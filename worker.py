@@ -46,8 +46,17 @@ except Exception:
     _embedder = None
 
 VERSION = "0.1.0"
-DB_PATH = "/root/character_memory_engine/engine.db"
-MODEL_DIR = "/root/character_memory_engine/models"
+
+# 路径：支持环境变量/参数覆盖，默认探测（先脚本同目录，再真机固定路径）
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.environ.get("MEMORY_ENGINE_DB", os.path.join(_SCRIPT_DIR, "engine.db"))
+MODEL_DIR = os.environ.get("MEMORY_ENGINE_MODEL_DIR", "")
+if not MODEL_DIR or not os.path.exists(MODEL_DIR):
+    _local_models = os.path.join(_SCRIPT_DIR, "models")
+    if os.path.exists(_local_models):
+        MODEL_DIR = _local_models
+    else:
+        MODEL_DIR = "/root/character_memory_engine/models"
 
 # 向量去重阈值（方案 A）：余弦 ≥ 0.9 判重复
 VEC_DEDUP_THRESHOLD = 0.9
@@ -765,6 +774,10 @@ def save_relationship(conn, params):
     return get_relationship(conn, params)
 
 
+def ping_worker(conn, params):
+    return {"success": True, "pong": True, "version": VERSION, "vec_available": VEC_AVAILABLE, "db": conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]}
+
+
 # ===== 路由 =====
 ACTIONS = {
     "list_memories": list_memories,
@@ -783,6 +796,7 @@ ACTIONS = {
     "save_character": save_character,
     "get_relationship": get_relationship,
     "save_relationship": save_relationship,
+    "ping_worker": ping_worker,
 }
 
 

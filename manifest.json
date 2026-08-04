@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.character_memory_engine",
+  "version": "0.1.0",
+  "main": "main.js",
+  "display_name": {
+    "zh": "角色记忆引擎",
+    "en": "Character Memory Engine"
+  },
+  "description": {
+    "zh": "独立的角色长期记忆引擎：SQLite 存储 + 语义去重 + 向量检索，复用角色记忆系统前端界面。",
+    "en": "Independent character long-term memory engine: SQLite storage + semantic dedup + vector retrieval, reusing Character Memory System UI."
+  },
+  "enabled_by_default": true,
+  "env": [
+    {
+      "name": "MEMORY_ENGINE_WORKER_URL",
+      "description": {
+        "zh": "Worker HTTP 地址，默认 http://127.0.0.1:8765",
+        "en": "Worker HTTP URL, default http://127.0.0.1:8765"
+      }
+    },
+    {
+      "name": "MEMORY_ENGINE_DIR",
+      "description": {
+        "zh": "Worker 代码与数据目录，默认 /sdcard/Download/character_memory_engine",
+        "en": "Worker code and data dir, default /sdcard/Download/character_memory_engine"
+      }
+    }
+  ],
+  "subpackages": [
+    {
+      "id": "memory_engine",
+      "entry": "packages/memory_engine.js",
+      "enabled_by_default": true,
+      "display_name": {
+        "zh": "角色记忆引擎工具",
+        "en": "Character Memory Engine Tools"
+      },
+      "description": {
+        "zh": "SQLite 记忆 CRUD、语义去重、语义检索，经 Worker HTTP 桥接",
+        "en": "SQLite memory CRUD, semantic dedup, semantic search via Worker HTTP bridge"
+      }
+    }
+  ],
+  "color": "#00796B"
+}
