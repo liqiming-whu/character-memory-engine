@@ -62,6 +62,10 @@ METADATA
             { "name": "character_id", "type": "string", "required": true, "description": "角色卡ID" },
             { "name": "target", "type": "string", "required": true, "description": "关系对象" }
         ]},
+        { "name": "import_legacy_backup", "description": { "zh": "从旧版本备份导入数据（ZIP或目录），幂等", "en": "Import data from legacy backup (zip or dir), idempotent" }, "parameters": [
+            { "name": "path", "type": "string", "required": true, "description": "备份ZIP路径或目录" },
+            { "name": "character_id", "type": "string", "required": false, "description": "导入到指定角色；不传则通用" }
+        ]},
         { "name": "save_relationship", "description": { "zh": "保存关系", "en": "Save relationship" }, "parameters": [
             { "name": "character_id", "type": "string", "required": true, "description": "角色卡ID" },
             { "name": "target", "type": "string", "required": true, "description": "关系对象" },
@@ -75,7 +79,7 @@ METADATA
 const TOOLS = ["list_memories", "get_memory", "create_memory", "update_memory", "delete_memory",
                "search_memories", "load_life_data", "upsert_life_item", "delete_life_item",
                "toggle_todo", "list_characters", "save_character", "get_relationship",
-               "save_relationship", "ping_worker"];
+               "save_relationship", "import_legacy_backup", "ping_worker"];
 
 // Worker HTTP 地址（可经 env 覆盖）
 function workerUrl() {

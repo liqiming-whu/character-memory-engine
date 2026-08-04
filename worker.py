@@ -778,6 +778,102 @@ def ping_worker(conn, params):
     return {"success": True, "pong": True, "version": VERSION, "vec_available": VEC_AVAILABLE, "db": conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]}
 
 
+def import_legacy_backup(conn, params):
+    """从旧版本（v1.5.x）备份导入数据。
+
+    支持 ZIP 文件或解压后的目录路径。备份结构（旧 export_backup 产物）：
+      manifest.json            { format:'character-memory-backup', files:[{path,size,digest}] }
+      data/<cat>.json          六类，{ schemaVersion, updatedAt, rows:[...] }
+      active_persona.json      当前角色 { id,name,type }
+      settings.json / reconcile_v1_4_0.json / last_ui_state.json（本阶段不导入）
+
+    导入策略：
+      - 六类 rows 逐条 create_memory（复用精确 hash + 文本相似度 + 向量三层去重，幂等）
+      - active_persona 导入 characters 表
+    返回统计。
+    """
+    path = params.get("path") or ""
+    character_id = params.get("character_id")  # 可选：导入到指定角色；不传则通用
+    if not path:
+        return {"success": False, "message": "missing path"}
+
+    import zipfile
+    import tempfile
+    import shutil
+
+    extracted_dir = None
+    try:
+        # 若是 ZIP，解压到临时目录
+        if os.path.isdir(path):
+            base = path
+        elif path.lower().endswith(".zip") and os.path.exists(path):
+            extracted_dir = tempfile.mkdtemp(prefix="engine_import_")
+            with zipfile.ZipFile(path) as zf:
+                zf.extractall(extracted_dir)
+            base = extracted_dir
+        else:
+            return {"success": False, "message": "path must be dir or zip"}
+
+        stats = {"categories": 0, "items": 0, "deduped": 0, "characters": 0, "errors": 0}
+
+        # 导入六类
+        for cat in LIFE_CATEGORIES:
+            cat_file = os.path.join(base, "data", cat + ".json")
+            if not os.path.exists(cat_file):
+                continue
+            try:
+                with open(cat_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except Exception as e:
+                stats["errors"] += 1
+                continue
+            rows = data.get("rows") or []
+            stats["categories"] += 1
+            for item in rows:
+                # 前端字段直接作为 create_memory 参数（worker 做字段映射 + 去重）
+                p = dict(item)
+                p["category"] = cat
+                if character_id:
+                    p["character_id"] = character_id
+                r = create_memory(conn, p)
+                if r.get("success"):
+                    stats["items"] += 1
+                    if r.get("deduped"):
+                        stats["deduped"] += 1
+                else:
+                    stats["errors"] += 1
+
+        # 导入 active_persona 到 characters
+        persona_file = os.path.join(base, "active_persona.json")
+        if os.path.exists(persona_file):
+            try:
+                with open(persona_file, "r", encoding="utf-8") as f:
+                    persona = json.load(f)
+                pid = persona.get("id") or persona.get("character_id")
+                pname = persona.get("name") or persona.get("characterName")
+                if pid and pname:
+                    now = int(time.time() * 1000)
+                    conn.execute(
+                        "INSERT OR REPLACE INTO characters (id, name, created_at, updated_at) VALUES (?,?,?,?)",
+                        (str(pid), str(pname), now, now),
+                    )
+                    conn.commit()
+                    stats["characters"] = 1
+            except Exception:
+                pass
+
+        conn.commit()
+        return {"success": True, "imported": stats}
+    except Exception as e:
+        return {"success": False, "message": "import failed: " + str(e)}
+    finally:
+        if extracted_dir:
+            try:
+                shutil.rmtree(extracted_dir, ignore_errors=True)
+            except Exception:
+                pass
+
+
 # ===== 路由 =====
 ACTIONS = {
     "list_memories": list_memories,
@@ -796,6 +892,7 @@ ACTIONS = {
     "save_character": save_character,
     "get_relationship": get_relationship,
     "save_relationship": save_relationship,
+    "import_legacy_backup": import_legacy_backup,
     "ping_worker": ping_worker,
 }
 
