@@ -22,7 +22,9 @@ import os
 import re
 import sqlite3
 import sys
+import threading
 import time
+import traceback
 import unicodedata
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -67,6 +69,32 @@ ROLE_CATEGORIES = ["character", "relationship", "preference", "interaction_rule"
 ALL_CATEGORIES = LIFE_CATEGORIES + ROLE_CATEGORIES
 
 
+# ===== 日志 =====
+# 写 <script_dir>/logs/engine.log（真机：/sdcard/Download/character_memory_engine/logs/engine.log），
+# 与 backups/、engine.db 同风格，可被插件 get_logs 读取。env MEMORY_ENGINE_LOG 可覆盖路径。
+_LOG_LOCK = threading.Lock()
+LOG_PATH = os.environ.get("MEMORY_ENGINE_LOG", os.path.join(_SCRIPT_DIR, "logs", "engine.log"))
+LOG_MAX_BYTES = 1024 * 1024  # 超 1MB 轮转为 engine.log.1
+
+
+def log(level, msg):
+    """写日志文件（线程安全、超限轮转），同时写 stderr 保留 /tmp 次要捕获。"""
+    line = "%s %-5s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), msg)
+    try:
+        with _LOG_LOCK:
+            os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+            if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
+                try:
+                    os.replace(LOG_PATH, LOG_PATH + ".1")
+                except Exception:
+                    pass
+            with open(LOG_PATH, "a", encoding="utf-8") as f:
+                f.write(line)
+        sys.stderr.write(line)
+    except Exception:
+        pass  # 日志失败不影响主流程
+
+
 # ===== 数据库 =====
 def get_conn(db_path):
     conn = sqlite3.connect(db_path)
@@ -97,7 +125,7 @@ def get_embedder():
         _embedder = Embedder(MODEL_DIR)
         return _embedder
     except Exception as e:
-        sys.stderr.write("[engine] embedder init failed: %s\n" % str(e))
+        log("WARN", "embedder init failed: %s" % str(e))
         return None
 
 
@@ -307,7 +335,7 @@ def vec_dedup(conn, category, title, content, character_id):
             return conn.execute("SELECT * FROM memories WHERE id=?", (best_id,)).fetchone()
         return None
     except Exception as e:
-        sys.stderr.write("[engine] vec_dedup error: %s\n" % str(e))
+        log("WARN", "vec_dedup error: %s" % str(e))
         return None
 
 
@@ -350,7 +378,7 @@ def search_memories(conn, params):
                 results.append((sim, mem))
             results.sort(key=lambda x: -x[0])
         except Exception as e:
-            sys.stderr.write("[engine] search vec error: %s\n" % str(e))
+            log("WARN", "search vec error: %s" % str(e))
 
     # 无向量或结果不足时，关键词兜底
     if not results:
@@ -546,7 +574,7 @@ def create_memory(conn, params):
             conn.execute("INSERT OR REPLACE INTO vec_items(rowid, embedding) VALUES (?, ?)", (mid, vec_str))
             conn.commit()
         except Exception as e:
-            sys.stderr.write("[engine] embed write failed: %s\n" % str(e))
+            log("WARN", "embed write failed: %s" % str(e))
     row = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
     return {"success": True, "memory": row_to_obj(row), "deduped": False}
 
@@ -776,6 +804,36 @@ def save_relationship(conn, params):
 
 def ping_worker(conn, params):
     return {"success": True, "pong": True, "version": VERSION, "vec_available": VEC_AVAILABLE, "db": conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]}
+
+
+def log_event(conn, params):
+    """插件 JS 侧日志写入同一 engine.log（source=js）。"""
+    level = str(params.get("level") or "INFO").upper()
+    msg = params.get("message") or params.get("msg") or ""
+    if msg:
+        log(level, "[js] %s" % msg)
+    return {"success": True}
+
+
+def get_logs(conn, params):
+    """读日志文件尾部 N 行，可选按级别过滤，供前端/调试查看。"""
+    n = int(params.get("limit") or 200)
+    level = str(params.get("level") or "").upper()
+    path = params.get("path") or LOG_PATH
+    try:
+        if not os.path.exists(path):
+            return {"success": True, "log": [], "path": path, "tail": 0, "size": 0}
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 128 * 1024))
+            tail = f.read()
+        lines = tail.splitlines()
+        if level:
+            lines = [ln for ln in lines if (" %s " % level) in ln]
+        return {"success": True, "log": lines[-n:], "path": path, "tail": len(lines[-n:]), "size": size}
+    except Exception as e:
+        return {"success": False, "message": "read log failed: " + str(e)}
 
 
 # ===== 部署状态 / 安装 / 重启 =====
@@ -1278,6 +1336,8 @@ ACTIONS = {
     "inspect_engine": inspect_engine,
     "restore_engine": restore_engine,
     "ping_worker": ping_worker,
+    "log_event": log_event,
+    "get_logs": get_logs,
 }
 
 
@@ -1289,6 +1349,7 @@ def handle_action(db_path, action, params):
             return {"success": False, "message": "unknown action: " + str(action)}
         return fn(conn, params or {})
     except Exception as e:
+        log("ERROR", "handle_action failed action=%s\n%s" % (action, traceback.format_exc()))
         return {"success": False, "message": "error: " + str(e)}
     finally:
         conn.close()
@@ -1297,6 +1358,7 @@ def handle_action(db_path, action, params):
 # ===== HTTP 服务 =====
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
+        t0 = time.time()
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length) if length else b"{}"
         try:
@@ -1306,6 +1368,16 @@ class Handler(BaseHTTPRequestHandler):
         action = req.get("action")
         params = req.get("params") or {}
         result = handle_action(self.server.db_path, action, params)
+        ms = int((time.time() - t0) * 1000)
+        ok = bool(result and result.get("success"))
+        msg = (result or {}).get("message") or ""
+        if action == "log_event":
+            pass  # 内部已记录，避免重复
+        elif action == "ping_worker":
+            log("DEBUG", "req action=%s ms=%dms ok=%s" % (action, ms, ok))
+        else:
+            log("INFO", "req action=%s ms=%dms ok=%s%s"
+                % (action, ms, ok, (" msg=" + str(msg)[:120]) if msg else ""))
         resp = json.dumps(result, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1339,7 +1411,7 @@ def main():
     init_db(args.db)
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.db_path = args.db
-    print(f"[engine] worker v{VERSION} listening on {args.port}, db={args.db}", flush=True)
+    log("INFO", "worker v%s listening on %s, db=%s" % (VERSION, args.port, args.db))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

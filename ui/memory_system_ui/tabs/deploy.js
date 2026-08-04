@@ -13,6 +13,9 @@ function render(ctx) {
   var statusState = ctx.useState('deploy_status', null);
   var busyState = ctx.useState('deploy_busy', false);
   var msgState = ctx.useState('deploy_msg', '');
+  var logState = ctx.useState('deploy_log', null);
+  var logLoadingState = ctx.useState('deploy_log_loading', false);
+  var logFilterState = ctx.useState('deploy_log_filter', '');
 
   async function checkStatus() {
     busyState[1](true);
@@ -30,6 +33,22 @@ function render(ctx) {
       msgState[1]('状态检查异常：' + (e.message || String(e)));
     }
     busyState[1](false);
+  }
+
+  async function loadLogs() {
+    logLoadingState[1](true);
+    try {
+      var raw = await ctx.callTool('memory_engine:get_logs', { limit: 200, level: logFilterState[0] || '' });
+      var r = parseResult(raw);
+      if (r && r.success) {
+        logState[1]({ lines: r.log || [], path: r.path || '' });
+      } else {
+        logState[1]({ lines: [], path: '', error: ((r && r.message) || '读取日志失败') });
+      }
+    } catch (e) {
+      logState[1]({ lines: [], path: '', error: '读取日志异常：' + (e.message || String(e)) });
+    }
+    logLoadingState[1](false);
   }
 
   async function doInstall() {
@@ -98,8 +117,50 @@ function render(ctx) {
         UI.Text({ text: '重启 Worker', style: 'labelSmall', color: colors.tertiary, fontWeight: 'bold' }),
       ]),
     ]),
+    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.secondaryContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: loadLogs }, [
+      UI.Row({ verticalAlignment: 'center' }, [
+        UI.Icon({ name: 'receipt_long', tint: colors.secondary, size: 16 }),
+        UI.Spacer({ width: 4 }),
+        UI.Text({ text: logLoadingState[0] ? '加载中...' : '查看日志', style: 'labelSmall', color: colors.secondary, fontWeight: 'bold' }),
+      ]),
+    ]),
   ]));
   items.push(UI.Spacer({ height: 8 }));
+
+  // 日志展示
+  var lg = logState[0];
+  if (lg) {
+    items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 10 }, containerColor: colors.surfaceContainerHigh, padding: 12 }, [
+      UI.Column({ spacing: 6 }, [
+        UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
+          UI.Text({ text: '日志', style: 'labelMedium', fontWeight: 'bold', color: colors.primary }),
+          UI.Spacer({ width: 8 }),
+          // 级别筛选
+          [['', '全部'], ['ERROR', '错误'], ['WARN', '警告']].map(function (f) {
+            var active = (logFilterState[0] || '') === f[0];
+            return UI.Surface({
+              shape: { cornerRadius: 6 },
+              containerColor: active ? colors.primary : colors.surfaceContainerHighest,
+              padding: { left: 8, right: 8, top: 3, bottom: 3 },
+              onClick: function () {
+                logFilterState[1](f[0]);
+                logState[1](null);
+                loadLogs();
+              }
+            }, [
+              UI.Text({ text: f[1], style: 'labelSmall', color: active ? colors.onPrimary : colors.onSurface, fontWeight: active ? 'bold' : 'normal' }),
+            ]);
+          }),
+        ]),
+        lg.error
+          ? UI.Text({ text: lg.error, style: 'labelSmall', color: colors.error })
+          : (lg.lines && lg.lines.length
+            ? UI.Text({ text: lg.lines.join('\n'), style: 'bodySmall', color: colors.onSurfaceVariant, fontFamily: 'monospace', fontSize: 10 })
+            : UI.Text({ text: '暂无日志', style: 'labelSmall', color: colors.onSurfaceVariant })),
+        lg.path ? UI.Text({ text: lg.path, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
+      ]),
+    ]));
+  }
 
   // 状态展示
   var st = statusState[0];

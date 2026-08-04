@@ -96,7 +96,12 @@ METADATA
             { "name": "stage", "type": "string", "required": false, "description": "关系阶段" },
             { "name": "notes", "type": "string", "required": false, "description": "备注" }
         ]},
-        { "name": "ping_worker", "description": { "zh": "检查 worker 是否可用", "en": "Check worker availability" }, "parameters": []}
+        { "name": "ping_worker", "description": { "zh": "检查 worker 是否可用", "en": "Check worker availability" }, "parameters": []},
+        { "name": "get_logs", "description": { "zh": "读取日志文件尾部", "en": "Read log tail" }, "parameters": [
+            { "name": "limit", "type": "integer", "required": false, "description": "返回行数，默认 200" },
+            { "name": "level", "type": "string", "required": false, "description": "级别过滤：ERROR/WARN/INFO/DEBUG" },
+            { "name": "path", "type": "string", "required": false, "description": "日志文件路径（默认 engine.log）" }
+        ]}
     ]
 }
 */
@@ -106,6 +111,21 @@ function workerUrl() {
     var u = '';
     try { u = getEnv('MEMORY_ENGINE_WORKER_URL') || ''; } catch (e) {}
     return u || 'http://127.0.0.1:8765';
+}
+
+// 写日志：经 worker log_event 落到 engine.log（fire-and-forget，失败不影响业务）
+async function logLocal(level, msg) {
+    try {
+        await Tools.Net.http({
+            url: workerUrl(),
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'log_event', params: { level: level, message: msg } }),
+            connect_timeout: 2000,
+            read_timeout: 2000,
+            ignore_ssl: true
+        });
+    } catch (e) {}
 }
 
 // 调 worker：POST JSON { action, params }
@@ -125,9 +145,13 @@ async function callEngine(action, params) {
         if (typeof response === 'string') body = response;
         else if (response && response.body) body = typeof response.body === 'string' ? response.body : JSON.stringify(response.body);
         else if (response && response.content) body = response.content;
-        if (!body) return { success: false, message: 'worker 无响应' };
+        if (!body) {
+            logLocal('ERROR', 'callEngine ' + action + ': worker 无响应');
+            return { success: false, message: 'worker 无响应' };
+        }
         return JSON.parse(body);
     } catch (e) {
+        logLocal('ERROR', 'callEngine ' + action + ': ' + (e.message || String(e)));
         return { success: false, message: 'worker 调用失败: ' + (e.message || String(e)), action: action };
     }
 }
@@ -167,6 +191,7 @@ exports.backup_engine = makeTool("backup_engine");
 exports.inspect_engine = makeTool("inspect_engine");
 exports.restore_engine = makeTool("restore_engine");
 exports.ping_worker = makeTool("ping_worker");
+exports.get_logs = makeTool("get_logs");
 
 // ===== analyze_chat：取对话 + 读 LLM 配置 + worker 分析 =====
 async function analyzeChat(params) {

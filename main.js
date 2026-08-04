@@ -18,11 +18,27 @@ var TRIGGER_FILE = '/sdcard/Download/character_memory_engine/trigger.json';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
+// 写日志：经 worker log_event 落到 engine.log（fire-and-forget，失败不影响业务）
+function jsLog(level, msg) {
+  try {
+    Tools.Net.http({
+      url: 'http://127.0.0.1:' + WORKER_PORT,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'log_event', params: { level: level, message: msg } }),
+      connect_timeout: 2000,
+      read_timeout: 2000,
+      ignore_ssl: true
+    }).catch(function() {});
+  } catch (e) {}
+}
+
 async function ensureWorkerRunning() {
     try {
         // 1) 检查 worker HTTP 是否已在运行
         var ok = await pingWorker();
         if (ok) return true;
+        jsLog('DEBUG', 'ensureWorkerRunning: worker 未运行，准备启动');
 
         // 2) 启动 worker（后台，用 venv python）
         var cmd = 'cd ' + ENGINE_DIR + ' && nohup /root/.venv/bin/python3 worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
@@ -33,7 +49,9 @@ async function ensureWorkerRunning() {
             try {
                 var sess = await Tools.System.terminal.create('engine_worker');
                 await Tools.System.terminal.exec(sess.sessionId, cmd, 15000);
-            } catch (e2) {}
+            } catch (e2) {
+                jsLog('WARN', 'ensureWorkerRunning: 启动 worker 失败: ' + (e2.message || String(e2)));
+            }
         }
 
         // 3) 等待 worker 就绪
@@ -41,8 +59,10 @@ async function ensureWorkerRunning() {
             await new Promise(function(res) { setTimeout(res, 1000); });
             if (await pingWorker()) return true;
         }
+        jsLog('ERROR', 'ensureWorkerRunning: 10 秒内 ping 不通 worker');
         return false;
     } catch (e) {
+        jsLog('ERROR', 'ensureWorkerRunning: ' + (e.message || String(e)));
         return false;
     }
 }
@@ -70,11 +90,18 @@ async function pingWorker() {
 
 // ===== 自动分析：PromptFinalize 冷却期结算旧对话 → worker AI 提取 =====
 async function autoAnalyzeChat(chatId, callerCardId, personaName) {
-  if (!chatId || !AUTO_ANALYZE_ENABLED) return;
+  if (!chatId || !AUTO_ANALYZE_ENABLED) {
+    jsLog('DEBUG', 'autoAnalyze: 跳过 chatId=' + (chatId || '(空)') + ' enabled=' + AUTO_ANALYZE_ENABLED);
+    return;
+  }
+  jsLog('INFO', 'autoAnalyze 开始 chatId=' + chatId);
   try {
     // 取对话
     var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc', limit: 200 });
-    if (!msgResult || !msgResult.messages || msgResult.messages.length === 0) return;
+    if (!msgResult || !msgResult.messages || msgResult.messages.length === 0) {
+      jsLog('DEBUG', 'autoAnalyze: 取对话为空 chatId=' + chatId);
+      return;
+    }
     var lines = [];
     for (var mi = 0; mi < msgResult.messages.length; mi++) {
       var m = msgResult.messages[mi];
@@ -85,7 +112,10 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
       lines.push(role + ': ' + c);
     }
     var chatText = lines.join('\n');
-    if (chatText.length < 10) return;
+    if (chatText.length < 10) {
+      jsLog('DEBUG', 'autoAnalyze: 对话内容过短 chatId=' + chatId);
+      return;
+    }
     // 读 LLM 配置
     var endpoint = '';
     try { endpoint = (getEnv('MEMORY_SYSTEM_ENDPOINT') || '').replace(/\/+$/, ''); } catch (e) {}
@@ -94,7 +124,10 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
     try { apiKey = getEnv('MEMORY_SYSTEM_KEY') || ''; } catch (e) {}
     var model = 'gpt-4o-mini';
     try { model = getEnv('MEMORY_SYSTEM_MODEL') || 'gpt-4o-mini'; } catch (e) {}
-    if (!endpoint || !apiKey) return;
+    if (!endpoint || !apiKey) {
+      jsLog('WARN', 'autoAnalyze: 未配置 LLM（endpoint/key），跳过 chatId=' + chatId);
+      return;
+    }
     // 调 worker analyze_chat
     var payload = {
       action: 'analyze_chat',
@@ -117,7 +150,20 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
       read_timeout: 120000,
       ignore_ssl: true
     });
-  } catch (e) {}
+    var rbody = '';
+    if (typeof resp === 'string') rbody = resp;
+    else if (resp && resp.body) rbody = resp.body;
+    else if (resp && resp.content) rbody = resp.content;
+    var resObj = null;
+    try { resObj = JSON.parse(rbody); } catch (e) {}
+    if (resObj && resObj.success) {
+      jsLog('INFO', 'autoAnalyze 完成 chatId=' + chatId + ' stats=' + JSON.stringify(resObj.stats || {}));
+    } else {
+      jsLog('ERROR', 'autoAnalyze 失败 chatId=' + chatId + ' resp=' + String(rbody).slice(0, 300));
+    }
+  } catch (e) {
+    jsLog('ERROR', 'autoAnalyze 异常 chatId=' + chatId + ': ' + (e.message || String(e)));
+  }
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
@@ -135,24 +181,33 @@ async function onPromptFinalize(input) {
     try {
       var tr = await Tools.Files.read(TRIGGER_FILE);
       if (tr && tr.content) trigger = JSON.parse(tr.content);
-    } catch (e) {}
+    } catch (e) {
+      jsLog('DEBUG', 'onPromptFinalize: 读 trigger 失败: ' + (e.message || String(e)));
+    }
 
     if (!trigger) {
       try {
         await Tools.Files.write(TRIGGER_FILE, JSON.stringify({ chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName }, null, 2), false, 'android');
-      } catch (e) {}
+      } catch (e) {
+        jsLog('DEBUG', 'onPromptFinalize: 写 trigger 失败: ' + (e.message || String(e)));
+      }
     } else {
       var cooldownPassed = (now - (trigger.cooldownStart || now)) >= COOLDOWN_MS;
       var processChatId = trigger.chatId || currentChatId;
       var chatIdChanged = trigger.chatId && trigger.chatId !== currentChatId;
       if (cooldownPassed || chatIdChanged) {
+        jsLog('INFO', 'onPromptFinalize: 触发自动分析 chatId=' + processChatId + ' cooldownPassed=' + cooldownPassed + ' chatChanged=' + chatIdChanged);
         autoAnalyzeChat(processChatId, trigger.callerCardId || callerCardId, trigger.personaName || personaName).catch(function() {});
       }
       try {
         await Tools.Files.write(TRIGGER_FILE, JSON.stringify({ chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName }, null, 2), false, 'android');
-      } catch (e) {}
+      } catch (e) {
+        jsLog('DEBUG', 'onPromptFinalize: 更新 trigger 失败: ' + (e.message || String(e)));
+      }
     }
-  } catch (e) {}
+  } catch (e) {
+    jsLog('WARN', 'onPromptFinalize 异常: ' + (e.message || String(e)));
+  }
   return null;
 }
 
@@ -160,7 +215,10 @@ async function onPromptFinalize(input) {
 function onAppCreate() {
     ensureWorkerRunning().then(function(ok) {
         try { setEnv('MEMORY_ENGINE_WORKER_READY', ok ? '1' : '0'); } catch (e) {}
-    }).catch(function() {});
+        if (!ok) jsLog('ERROR', 'onAppCreate: worker 启动失败（READY=0）');
+    }).catch(function(e) {
+        jsLog('ERROR', 'onAppCreate: ensureWorkerRunning 异常: ' + (e && e.message ? e.message : String(e)));
+    });
     return { ok: true };
 }
 
