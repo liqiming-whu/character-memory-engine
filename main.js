@@ -69,17 +69,42 @@ var WORKER_PY_CANDIDATES = [
 ];
 
 async function locateWorkerPy() {
+    // 遍历候选目录，取修改时间最新的 worker.py（新安装的 toolpkg 解压时间更新）
+    var best = '';
+    var bestMtime = -1;
     for (var di = 0; di < WORKER_PY_CANDIDATES.length; di++) {
         try {
+            // -printf '%T@ %p' 输出 mtime+路径，sort -nr 取最新；无 -printf 时退化 head -1
             var out = await execTerminal(
-                "find " + WORKER_PY_CANDIDATES[di] + " -maxdepth 2 -name worker.py 2>/dev/null | head -1",
+                "find " + WORKER_PY_CANDIDATES[di] + " -maxdepth 3 -name worker.py 2>/dev/null -printf '%T@ %p\\n' | sort -nr | head -1",
                 8000
             );
-            var p = String(out || '').trim();
-            if (p && p.indexOf('worker.py') >= 0) return p;
+            var line = String(out || '').trim();
+            if (!line) continue;
+            var m = line.match(/^([0-9.]+) (.+)$/);
+            if (m) {
+                var mt = parseFloat(m[1]);
+                if (mt > bestMtime) { bestMtime = mt; best = m[2]; }
+            } else if (line.indexOf('worker.py') >= 0) {
+                // find 不支持 -printf（busybox）时回退
+                if (best === '') best = line.split(/\s+/).pop();
+            }
         } catch (e) {}
     }
-    return '';
+    if (!best) {
+        // 最后兜底：纯 head -1
+        for (var di2 = 0; di2 < WORKER_PY_CANDIDATES.length; di2++) {
+            try {
+                var out2 = await execTerminal(
+                    "find " + WORKER_PY_CANDIDATES[di2] + " -maxdepth 2 -name worker.py 2>/dev/null | head -1",
+                    8000
+                );
+                var p2 = String(out2 || '').trim();
+                if (p2 && p2.indexOf('worker.py') >= 0) { best = p2; break; }
+            } catch (e) {}
+        }
+    }
+    return best;
 }
 
 // ensureWorkerRunning 单例：并发调用共享同一次启动，避免重复拉起 worker
@@ -95,10 +120,10 @@ function ensureWorkerRunning() {
 
 async function doEnsureWorkerRunning() {
     try {
-        // 1) 检查 worker HTTP 是否已在运行
+        // 1) 检查 worker HTTP 是否已在运行（旧版 worker 可能因表缺失 ping 失败但占用端口）
         var ok = await pingWorker();
         if (ok) return true;
-        jsLog('DEBUG', 'ensureWorkerRunning: worker 未运行，准备启动');
+        jsLog('DEBUG', 'ensureWorkerRunning: worker 未就绪，准备启动');
 
         // 2) 定位 worker.py（toolpkg_cache 优先，其次 Download / root）
         var workerPy = await locateWorkerPy();
@@ -119,7 +144,12 @@ async function doEnsureWorkerRunning() {
         } catch (e) {}
         if (!pyCmd) pyCmd = 'python3';
 
-        // 4) 启动 worker（后台，在 worker 所在目录运行，日志重定向到 /tmp/engine_worker.log）
+        // 4) 杀掉占用端口/匹配 python worker.py 的旧进程（旧版无懒建表，会占用端口导致新 worker 起不来）
+        var killCmd = "for p in $(pgrep -f 'python.*worker.py' 2>/dev/null); do kill $p 2>/dev/null; done; sleep 1; echo done";
+        try { await execTerminal(killCmd, 8000); } catch (e) {}
+        jsLog('INFO', 'ensureWorkerRunning: 已清理旧 worker 进程');
+
+        // 5) 启动 worker（后台，在 worker 所在目录运行，日志重定向到 /tmp/engine_worker.log）
         var cmd = 'cd ' + workerDir + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
         jsLog('INFO', 'ensureWorkerRunning: 启动 worker -> ' + cmd);
         try {
@@ -134,7 +164,7 @@ async function doEnsureWorkerRunning() {
             }
         }
 
-        // 5) 等待 worker 就绪
+        // 6) 等待 worker 就绪
         for (var i = 0; i < 12; i++) {
             await new Promise(function(res) { setTimeout(res, 1000); });
             if (await pingWorker()) return true;
