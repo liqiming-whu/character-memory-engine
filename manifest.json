@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.character_memory_engine",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "main": "main.js",
   "display_name": {
     "zh": "角色记忆引擎",
@@ -23,8 +23,8 @@
     {
       "name": "MEMORY_ENGINE_DIR",
       "description": {
-        "zh": "Worker 代码与数据目录，默认 /sdcard/Download/character_memory_engine",
-        "en": "Worker code and data dir, default /sdcard/Download/character_memory_engine"
+        "zh": "引擎数据目录，默认 /sdcard/Download/Operit/character_memory_engine",
+        "en": "Engine data dir, default /sdcard/Download/Operit/character_memory_engine"
       }
     }
   ],

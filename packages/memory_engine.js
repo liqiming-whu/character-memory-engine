@@ -107,19 +107,14 @@ METADATA
 }
 */
 
-// ===== 一次性 CLI 调用架构（参考 dual-life-hub）=====
-// 每次操作：部署 worker → 写 payload.json → bash -lc 调 python worker.py --cli action payload
-// → 解析 __LIFE_HUB_JSON__ 标记行。不做常驻 HTTP，避免端口/进程/连接状态问题。
+// ===== HTTP 桥接架构 =====
+// worker 以常驻 HTTP 服务运行（python worker.py --port 8765），前端经 Tools.Net.http 调用。
+// 不再依赖终端 python3 路径与 /root 可见性；worker 不在线时尝试自动拉起并给出指引。
 
-var LINUX_DIR = '/root/character_memory_engine';
-var WORKER_PATH = LINUX_DIR + '/worker.py';
-var MARKER = '__LIFE_HUB_JSON__';
-var _deployed = false;
-var _queue = Promise.resolve();
-
-function shellQuote(value) {
-  return "'" + String(value).replace(/'/g, "'\\''") + "'";
-}
+var WORKER_URL = 'http://127.0.0.1:8765';
+try { WORKER_URL = getEnv('MEMORY_ENGINE_WORKER_URL') || WORKER_URL; } catch (e) {}
+var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
+try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
 function withTimeout(promise, ms, message) {
   var timer;
@@ -131,122 +126,79 @@ function withTimeout(promise, ms, message) {
   ]).finally(function () { clearTimeout(timer); });
 }
 
-// 部署 worker.py + embed.py + models（正确用法：await ToolPkg.readResource(key)，签名 (key, outputFileName, internal)）
-async function ensureWorker() {
-  if (_deployed) return WORKER_PATH;
+// 经 HTTP 调用 worker；worker 不在线时给出可执行的启动指引
+async function httpCall(action, payload) {
+  var resp;
   try {
-    await withTimeout(Tools.Files.mkdir(LINUX_DIR, true, "linux"), 8000, "创建运行目录超时。");
-    // 部署 worker.py
-    var resource = await withTimeout(
-      ToolPkg.readResource("engine_worker_py", "engine_worker_public.py"),
-      10000,
-      "读取 worker 程序超时。"
+    resp = await withTimeout(
+      Tools.Net.http({
+        url: WORKER_URL,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json' },
+        body: JSON.stringify({ action: action, params: payload || {} }),
+        connect_timeout: 5,
+        read_timeout: 60,
+        validateStatus: false
+      }),
+      70000,
+      'worker 调用超时。'
     );
-    if (!resource) throw new Error("worker 程序资源缺失。");
-    await withTimeout(
-      Tools.Files.copy(String(resource), WORKER_PATH, false, "android", "linux"),
-      10000,
-      "部署 worker 程序超时。"
-    );
-    // 部署 embed.py（worker 依赖 from embed import Embedder）
-    try {
-      var embedSrc = await ToolPkg.readResource("engine_embed_py", "engine_embed_public.py");
-      if (embedSrc) {
-        await Tools.Files.copy(String(embedSrc), LINUX_DIR + "/embed.py", false, "android", "linux");
-      }
-    } catch (e) {}
-    // 部署 models（worker 用 _SCRIPT_DIR/models 探测）
-    try {
-      await Tools.Files.mkdir(LINUX_DIR + "/models", true, "linux");
-      var modelFiles = [
-        ["engine_model_config", "config.json"],
-        ["engine_model_onnx", "model_int8.onnx"],
-        ["engine_model_tokenizer", "tokenizer.json"]
-      ];
-      for (var mi = 0; mi < modelFiles.length; mi++) {
-        try {
-          var mSrc = await ToolPkg.readResource(modelFiles[mi][0], "engine_" + modelFiles[mi][1]);
-          if (mSrc) {
-            await Tools.Files.copy(String(mSrc), LINUX_DIR + "/models/" + modelFiles[mi][1], false, "android", "linux");
-          }
-        } catch (e) {}
-      }
-    } catch (e) {}
-    _deployed = true;
   } catch (e) {
-    throw e;
+    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
   }
-  return WORKER_PATH;
+  var text = String(resp && (resp.content || resp.body || '') || '');
+  var data = null;
+  try { data = JSON.parse(text); } catch (e) {}
+  if (data && typeof data === 'object') {
+    if (resp && resp.statusCode >= 400 && data.success === undefined) {
+      data.success = false;
+      data.httpStatus = resp.statusCode;
+    }
+    return data;
+  }
+  return { success: false, message: 'worker 返回无法解析: HTTP ' + (resp && resp.statusCode) + ' ' + text.slice(0, 200) };
 }
 
-function parseCliOutput(result) {
-  var output = String(result && result.output || "");
-  var pos = output.lastIndexOf(MARKER);
-  if (pos < 0) {
-    throw new Error("worker 没有返回有效结果。\n" + output.slice(-1000));
-  }
-  var line = output.slice(pos + MARKER.length).split(/\r?\n/)[0].trim();
-  var parsed;
-  try { parsed = JSON.parse(line); }
-  catch (_error) { throw new Error("worker 结果无法解析。\n" + line.slice(0, 1000)); }
-  return parsed;
-}
-
-async function execWorker(command) {
+// 尝试拉起常驻 worker（幂等：已在线则跳过）
+async function ensureWorkerUp() {
+  var ping = await httpCall('ping_worker', {});
+  if (ping && ping.success) return { success: true, alreadyUp: true };
   var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) throw new Error("Operit 未提供终端执行能力。");
-  if (typeof terminal.hiddenExec === "function") {
-    return withTimeout(
-      terminal.hiddenExec(command, { executorKey: "character_memory_engine", timeoutMs: 30000 }),
-      35000,
-      "worker 操作超时。"
-    );
-  }
-  var session = await withTimeout(
-    terminal.create("character_memory_engine_once"),
-    8000,
-    "创建终端会话超时。"
-  );
-  if (!session || !session.sessionId) throw new Error("无法创建终端会话。");
+  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  var script = [
+    "mkdir -p " + DATA_DIR + "/logs",
+    "pgrep -f 'worker.py --port' >/dev/null 2>&1 || (",
+    "  nohup /root/.venv/bin/python3.12 " + DATA_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 &",
+    "  echo started",
+    ") || echo already-running"
+  ].join('; ');
   try {
-    return await withTimeout(
-      terminal.exec(session.sessionId, command, 30000),
-      35000,
-      "worker 操作超时。"
-    );
-  } finally {
-    try { await terminal.close(session.sessionId); } catch (_closeError) {}
+    if (typeof terminal.hiddenExec === 'function') {
+      await withTimeout(terminal.hiddenExec('bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", { executorKey: 'character_memory_engine', timeoutMs: 20000 }), 25000, '拉起 worker 超时。');
+    } else {
+      var sess = await withTimeout(terminal.create('memory_engine_start'), 8000, '创建终端会话超时。');
+      await withTimeout(terminal.exec(sess.sessionId, 'bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", 20000), 25000, '拉起 worker 超时。');
+      try { await terminal.close(sess.sessionId); } catch (e) {}
+    }
+  } catch (e) {
+    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
   }
+  await new Promise(function (r) { setTimeout(r, 3000); });
+  var ping2 = await httpCall('ping_worker', {});
+  if (ping2 && ping2.success) return { success: true, started: true };
+  return { success: false, message: '拉起后 worker 仍未响应。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
 }
 
-async function runOnce(action, payload) {
-  var worker = await ensureWorker();
-  var payloadPath = LINUX_DIR + "/payload_" + Date.now() + "_" + Math.floor(Math.random() * 1000000) + ".json";
-  await withTimeout(
-    Tools.Files.write(payloadPath, JSON.stringify(payload || {}), false, "linux"),
-    8000,
-    "写入操作参数超时。"
-  );
-  try {
-    var script = [
-      "unset PYTHONHOME PYTHONPATH",
-      "export PYTHONUTF8=1 LC_ALL=C LANG=C",
-      "python_bin=\"$(command -v python3 2>/dev/null || true)\"",
-      "[ -n \"$python_bin\" ] || { echo 'python3 not found'; exit 127; }",
-      "\"$python_bin\" " + shellQuote(worker) + " --cli " + shellQuote(String(action)) + " " + shellQuote(payloadPath)
-    ].join("; ");
-    var result = await execWorker("bash -lc " + shellQuote(script));
-    return parseCliOutput(result);
-  } finally {
-    try { await Tools.Files.deleteFile(payloadPath, false, "linux"); } catch (_deleteError) {}
-  }
-}
-
+// 工具调用入口：HTTP 直调；失败时尝试拉起 worker 一次再重试
 function run(action, payload) {
-  var task = function () { return runOnce(action, payload || {}); };
-  var current = _queue.then(task, task);
-  _queue = current.catch(function () {});
-  return current;
+  return httpCall(action, payload || {}).then(function (r) {
+    if (r && r.success) return r;
+    // worker 不在线或调用失败：尝试拉起一次再重试
+    return ensureWorkerUp().then(function (up) {
+      if (up && !up.success) return up;
+      return httpCall(action, payload || {});
+    });
+  });
 }
 
 // 工具导出：显式 exports（Operit subpackage 解析器识别显式导出名）

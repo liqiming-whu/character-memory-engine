@@ -17,15 +17,15 @@ var TRIGGER_FILE = '/sdcard/Download/Operit/character_memory_engine/trigger.json
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
-// 写日志：追加到 engine.log（不经 worker，CLI 架构下 worker 不常驻）
+// 写日志：追加到 engine.log（Tools.Files.write 支持 append=true）
 function jsLog(level, msg) {
   try {
     var logPath = '/sdcard/Download/Operit/character_memory_engine/logs/engine.log';
     var line = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' ' + String(level).toUpperCase().padEnd(5) + ' [js] ' + msg + '\n';
-    // 先尝试 append（Operit Files 可能无 append，退化为先读后写）
     try {
-      Tools.Files.append ? Tools.Files.append(logPath, line, false, 'android') : null;
+      Tools.Files.write(logPath, line, true, 'android');
     } catch (e) {
+      // append 不可用时退化为先读后写
       try {
         var old = Tools.Files.read(logPath);
         var oldText = (old && (old.content || old.text)) || '';
@@ -101,7 +101,7 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
       character_id: callerCardId ? String(callerCardId) : undefined,
       persona_name: personaName || ''
     };
-    var resObj = await runCliOnce('analyze_chat', payload);
+    var resObj = await httpCall('analyze_chat', payload);
     if (resObj && resObj.success) {
       jsLog('INFO', 'autoAnalyze 完成 chatId=' + chatId + ' stats=' + JSON.stringify(resObj.stats || {}));
     } else {
@@ -112,60 +112,55 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
   }
 }
 
-// CLI 一次性调用 worker（main.js 侧独立实现，与 memory_engine.js 相同模式）
-var _mainCliDir = '/root/character_memory_engine';
-var _mainCliDeployed = false;
-var _mainCliQueue = Promise.resolve();
-async function runCliOnce(action, payload) {
-  var worker = await ensureMainWorker();
-  var payloadPath = _mainCliDir + "/payload_" + Date.now() + "_" + Math.floor(Math.random() * 1000000) + ".json";
-  await execTerminal("mkdir -p " + _mainCliDir, 5000);
+// HTTP 桥接调用 worker（与 memory_engine.js 同模式：常驻 HTTP，避免终端 python3 依赖）
+var WORKER_URL = 'http://127.0.0.1:8765';
+try { WORKER_URL = getEnv('MEMORY_ENGINE_WORKER_URL') || WORKER_URL; } catch (e) {}
+var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
+try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
+
+async function httpCall(action, payload) {
   try {
-    await Tools.Files.write(payloadPath, JSON.stringify(payload || {}), false, "linux");
-    var script = [
-      "unset PYTHONHOME PYTHONPATH",
-      "export PYTHONUTF8=1 LC_ALL=C LANG=C",
-      "python_bin=\"$(command -v python3 2>/dev/null || true)\"",
-      "[ -n \"$python_bin\" ] || { echo 'python3 not found'; exit 127; }",
-      "\"$python_bin\" " + worker + " --cli " + action + " " + payloadPath
-    ].join("; ");
-    var out = await execTerminal("bash -lc " + "'" + script.replace(/'/g, "'\\''") + "'", 120000);
-    var MARKER = '__LIFE_HUB_JSON__';
-    var pos = String(out).lastIndexOf(MARKER);
-    if (pos < 0) return { success: false, message: 'worker 无返回' };
-    var line = String(out).slice(pos + MARKER.length).split(/\r?\n/)[0].trim();
-    try { return JSON.parse(line); } catch (e) { return { success: false, message: '解析失败' }; }
-  } finally {
-    try { await Tools.Files.deleteFile(payloadPath, false, "linux"); } catch (e) {}
+    var resp = await Tools.Net.http({
+      url: WORKER_URL,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json; charset=utf-8', 'Accept': 'application/json' },
+      body: JSON.stringify({ action: action, params: payload || {} }),
+      connect_timeout: 5,
+      read_timeout: 60,
+      validateStatus: false
+    });
+    var text = String(resp && (resp.content || resp.body || '') || '');
+    var data = null;
+    try { data = JSON.parse(text); } catch (e) {}
+    if (data && typeof data === 'object') return data;
+    return { success: false, message: 'worker 返回无法解析: HTTP ' + (resp && resp.statusCode) + ' ' + text.slice(0, 200) };
+  } catch (e) {
+    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) };
   }
 }
-async function ensureMainWorker() {
-  if (_mainCliDeployed) return _mainCliDir + '/worker.py';
-  await execTerminal("mkdir -p " + _mainCliDir + "/models", 5000);
-  var resource = await ToolPkg.readResource("engine_worker_py", "engine_worker_public.py");
-  if (!resource) throw new Error('worker 资源缺失');
-  await Tools.Files.copy(String(resource), _mainCliDir + "/worker.py", false, "android", "linux");
-  // embed.py（worker 依赖 from embed import Embedder）
+
+// 尝试拉起常驻 worker（幂等）
+async function ensureWorkerUp() {
+  var ping = await httpCall('ping_worker', {});
+  if (ping && ping.success) return { success: true, alreadyUp: true };
+  var script = [
+    "mkdir -p " + DATA_DIR + "/logs",
+    "pgrep -f 'worker.py --port' >/dev/null 2>&1 || (",
+    "  nohup /root/.venv/bin/python3.12 " + DATA_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 &",
+    "  echo started",
+    ") || echo already-running"
+  ].join('; ');
   try {
-    var embedSrc = await ToolPkg.readResource("engine_embed_py", "engine_embed_public.py");
-    if (embedSrc) await Tools.Files.copy(String(embedSrc), _mainCliDir + "/embed.py", false, "android", "linux");
-  } catch (e) {}
-  // models
-  try {
-    var modelFiles = [
-      ["engine_model_config", "config.json"],
-      ["engine_model_onnx", "model_int8.onnx"],
-      ["engine_model_tokenizer", "tokenizer.json"]
-    ];
-    for (var mi = 0; mi < modelFiles.length; mi++) {
-      try {
-        var mSrc = await ToolPkg.readResource(modelFiles[mi][0], "engine_" + modelFiles[mi][1]);
-        if (mSrc) await Tools.Files.copy(String(mSrc), _mainCliDir + "/models/" + modelFiles[mi][1], false, "android", "linux");
-      } catch (e) {}
+    if (Tools.System && Tools.System.terminal && typeof Tools.System.terminal.hiddenExec === 'function') {
+      await Tools.System.terminal.hiddenExec('bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", { executorKey: 'character_memory_engine', timeoutMs: 20000 });
     }
-  } catch (e) {}
-  _mainCliDeployed = true;
-  return _mainCliDir + '/worker.py';
+  } catch (e) {
+    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) };
+  }
+  await new Promise(function (r) { setTimeout(r, 3000); });
+  var ping2 = await httpCall('ping_worker', {});
+  if (ping2 && ping2.success) return { success: true, started: true };
+  return { success: false, message: '拉起后 worker 仍未响应，请手动启动：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
@@ -214,14 +209,14 @@ async function onPromptFinalize(input) {
   return null;
 }
 
-// 应用创建时部署 worker（CLI 架构：不启动常驻进程，首次工具调用时自动部署）
+// 应用创建时尝试拉起常驻 worker（HTTP 架构：worker 常驻，首次调用即通）
 function onAppCreate() {
-    // 预部署 worker.py 到固定路径，避免首次调用时等待
     try {
-        ensureMainWorker().then(function() {
-            try { setEnv('MEMORY_ENGINE_WORKER_READY', '1'); } catch (e) {}
+        ensureWorkerUp().then(function (up) {
+            try { setEnv('MEMORY_ENGINE_WORKER_READY', (up && up.success) ? '1' : '0'); } catch (e) {}
+            if (!up || !up.success) jsLog('WARN', 'onAppCreate: worker 未就绪: ' + (up && up.message ? up.message : '未知原因'));
         }).catch(function(e) {
-            jsLog('ERROR', 'onAppCreate: worker 预部署失败: ' + (e && e.message ? e.message : String(e)));
+            jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
             try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
         });
     } catch (e) {}
