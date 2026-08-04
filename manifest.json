@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.character_memory_engine",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "main": "main.js",
   "display_name": {
     "zh": "角色记忆引擎",
@@ -41,6 +41,33 @@
         "zh": "SQLite 记忆 CRUD、语义去重、语义检索，经 Worker HTTP 桥接",
         "en": "SQLite memory CRUD, semantic dedup, semantic search via Worker HTTP bridge"
       }
+    }
+  ],
+  "resources": [
+    {
+      "key": "engine_worker_py",
+      "path": "worker.py",
+      "mime": "text/x-python"
+    },
+    {
+      "key": "engine_embed_py",
+      "path": "embed.py",
+      "mime": "text/x-python"
+    },
+    {
+      "key": "engine_model_config",
+      "path": "models/config.json",
+      "mime": "application/json"
+    },
+    {
+      "key": "engine_model_onnx",
+      "path": "models/model_int8.onnx",
+      "mime": "application/octet-stream"
+    },
+    {
+      "key": "engine_model_tokenizer",
+      "path": "models/tokenizer.json",
+      "mime": "application/json"
     }
   ],
   "color": "#00796B"

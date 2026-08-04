@@ -10,9 +10,14 @@ exports.onPromptFinalize = onPromptFinalize;
 var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 
 // ===== Worker 部署与启动 =====
-// worker.py 真实位置由 Operit 解压到 toolpkg_cache（或手动部署到 Download），动态探测。
+// 参考 dual-life-hub：用 ToolPkg.readResource 把 worker.py 从包资源复制到固定路径，
+// 不依赖 toolpkg_cache 解压位置（该位置在 Operit 升级/清理时会变）。
+var TOOLPKG_ID = 'com.operit.character_memory_engine';
+var WORKER_DIR = '/root/character_memory_engine'; // 与 venv 同目录，root 下可写
+var WORKER_PATH = WORKER_DIR + '/worker.py';
+var EMBED_PATH = WORKER_DIR + '/embed.py';
 var WORKER_PORT = 8765;
-var TRIGGER_FILE = '/sdcard/Download/character_memory_engine/trigger.json';
+var TRIGGER_FILE = WORKER_DIR + '/trigger.json';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
@@ -38,24 +43,6 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
-// 探测 worker.py 真实路径：先找 toolpkg_cache（Operit 解压位置），再找 Download（手动部署）
-async function findWorkerPy() {
-    var dirs = [
-        "/storage/emulated/0/Android/data/com.ai.assistance.operit/files/toolpkg_cache",
-        "/data/data/com.ai.assistance.operit/files/toolpkg_cache",
-        "/sdcard/Download/character_memory_engine",
-        "/storage/emulated/0/Download/character_memory_engine"
-    ];
-    for (var di = 0; di < dirs.length; di++) {
-        try {
-            var out = await execTerminal("find " + dirs[di] + " -maxdepth 2 -name worker.py 2>/dev/null | head -1", 8000);
-            var p = String(out || '').trim();
-            if (p && p.indexOf('worker.py') >= 0) return p;
-        } catch (e) {}
-    }
-    return '';
-}
-
 async function execTerminal(cmd, timeoutMs) {
     try {
         var r = await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs || 15000 });
@@ -70,6 +57,47 @@ async function execTerminal(cmd, timeoutMs) {
             await Tools.System.terminal.exec(sess.sessionId, cmd, timeoutMs || 15000);
         } catch (e2) {}
         return '';
+    }
+}
+
+// 把 worker.py / embed.py / models 从包资源部署到固定路径（dual-life-hub 同款模式）
+var _deployed = false;
+async function deployWorkerFiles() {
+    if (_deployed) return true;
+    try {
+        await execTerminal('mkdir -p ' + WORKER_DIR + '/models', 8000);
+        // readResource 返回复制到缓存后的绝对路径，再 copy 到固定目录
+        var workerSrc = ToolPkg.readResource(TOOLPKG_ID, 'engine_worker_py', 'worker.py', 'false');
+        if (workerSrc) {
+            await Tools.Files.copy(String(workerSrc), WORKER_PATH, false, 'android', 'linux');
+        }
+        var embedSrc = ToolPkg.readResource(TOOLPKG_ID, 'engine_embed_py', 'embed.py', 'false');
+        if (embedSrc) {
+            await Tools.Files.copy(String(embedSrc), EMBED_PATH, false, 'android', 'linux');
+        }
+        // 模型资源：config.json / model_int8.onnx / tokenizer.json → models/
+        var modelFiles = [
+            ['engine_model_config', 'config.json'],
+            ['engine_model_onnx', 'model_int8.onnx'],
+            ['engine_model_tokenizer', 'tokenizer.json']
+        ];
+        for (var mi = 0; mi < modelFiles.length; mi++) {
+            try {
+                var mSrc = ToolPkg.readResource(TOOLPKG_ID, modelFiles[mi][0], modelFiles[mi][1], 'false');
+                if (mSrc) {
+                    await Tools.Files.copy(String(mSrc), WORKER_DIR + '/models/' + modelFiles[mi][1], false, 'android', 'linux');
+                }
+            } catch (e) {
+                jsLog('WARN', 'deployWorkerFiles: 模型 ' + modelFiles[mi][1] + ' 部署失败: ' + (e.message || String(e)));
+            }
+        }
+        var ok = await execTerminal('test -f ' + WORKER_PATH + ' && echo OK', 5000);
+        _deployed = String(ok).indexOf('OK') >= 0;
+        if (!_deployed) jsLog('ERROR', 'deployWorkerFiles: worker.py 复制到 ' + WORKER_PATH + ' 失败');
+        return _deployed;
+    } catch (e) {
+        jsLog('ERROR', 'deployWorkerFiles: ' + (e.message || String(e)));
+        return false;
     }
 }
 
@@ -91,13 +119,12 @@ async function doEnsureWorkerRunning() {
         if (ok) return true;
         jsLog('DEBUG', 'ensureWorkerRunning: worker 未运行，准备启动');
 
-        // 2) 探测 worker.py 真实路径
-        var workerPy = await findWorkerPy();
-        if (!workerPy) {
-            jsLog('ERROR', 'ensureWorkerRunning: 未找到 worker.py（已探测 toolpkg_cache + Download）');
+        // 2) 部署 worker.py / embed.py 到固定路径
+        var deployed = await deployWorkerFiles();
+        if (!deployed) {
+            jsLog('ERROR', 'ensureWorkerRunning: worker.py 部署失败，无法启动');
             return false;
         }
-        var workerDir = workerPy.substring(0, workerPy.lastIndexOf('/'));
 
         // 3) 选择 python：优先 /root/.venv（真机已验证），否则系统 python3
         var pyCmd = '';
@@ -110,7 +137,7 @@ async function doEnsureWorkerRunning() {
         if (!pyCmd) pyCmd = 'python3';
 
         // 4) 启动 worker（后台，日志重定向到 /tmp/engine_worker.log）
-        var cmd = 'cd ' + workerDir + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
+        var cmd = 'cd ' + WORKER_DIR + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
         jsLog('INFO', 'ensureWorkerRunning: 启动 worker -> ' + cmd);
         try {
             await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: 15000 });
