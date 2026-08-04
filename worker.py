@@ -931,19 +931,34 @@ def get_logs(conn, params):
 def _find_worker_processes():
     """查找本 worker 进程（含重复）。返回 (count, pids)。
 
-    只匹配真正的 python worker 进程：Operit 会用隐藏 shell 包装启动命令，
-    其 cmdline 也含 worker.py，用 pgrep -f worker.py 会误匹配到 shell 脚本 PID。
-    这里用 pgrep -f "python.*worker.py" 匹配 python 解释器命令行。
+    只匹配真正的 python worker 进程：cmdline 同时含 python 与 worker.py。
+    优先用 pgrep；不可用时（proot/Termux 常见无 procps）回退 /proc 遍历。
     """
     import subprocess
+    import os
+    pids = []
     try:
         out = subprocess.check_output(
             ["pgrep", "-f", r"python.*worker\.py"], stderr=subprocess.DEVNULL
         ).decode().strip()
         pids = [p for p in out.split("\n") if p.strip()]
-        return len(pids), pids
     except Exception:
-        return 0, []
+        pids = []
+    if not pids:
+        try:
+            for pid in os.listdir("/proc"):
+                if not pid.isdigit():
+                    continue
+                try:
+                    with open("/proc/%s/cmdline" % pid, "rb") as f:
+                        cmd = f.read().replace(b"\0", b" ").decode(errors="ignore")
+                    if "worker.py" in cmd and "python" in cmd:
+                        pids.append(pid)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return len(pids), pids
 
 
 def _check_module(mod_name):

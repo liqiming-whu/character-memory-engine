@@ -116,6 +116,39 @@ try { WORKER_URL = getEnv('MEMORY_ENGINE_WORKER_URL') || WORKER_URL; } catch (e)
 var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
+// ===== 调试探针（临时）：记录每次工具调用的返回，用于定位 UI "未知错误" =====
+var DBG_LOG = '/sdcard/Download/Operit/character_memory_engine/logs/dbg_call.log';
+function dbgLog(action, obj) {
+  try {
+    var line = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' [' + action + '] ' + JSON.stringify(obj).slice(0, 600) + '\n';
+    try { Tools.Files.write(DBG_LOG, line, true, 'android'); }
+    catch (e) {
+      try {
+        var old = Tools.Files.read(DBG_LOG);
+        var oldText = (old && (old.content || old.text)) || '';
+        Tools.Files.write(DBG_LOG, oldText + line, false, 'android');
+      } catch (e2) {}
+    }
+  } catch (e) {}
+}
+
+// 统一收尾：按 Operit 约定包装结果。
+// 关键：Operit UI 侧 parseToolResult 成功时只返回 result.data；
+// 失败时抛异常（message 取 result.message）。所以成功必须带 data 字段。
+function finish(result) {
+  var out = result;
+  if (result && typeof result === 'object' && typeof result.success === 'boolean') {
+    if (result.success) {
+      out = { success: true, data: result, message: result.message || 'OK' };
+    } else {
+      out = { success: false, message: result.message || '操作失败' };
+    }
+  }
+  try { dbgLog('finish', out); } catch (e) {}
+  try { complete(out); } catch (e) {}
+  return out;
+}
+
 function withTimeout(promise, ms, message) {
   var timer;
   return Promise.race([
@@ -205,9 +238,9 @@ function run(action, payload) {
 function makeTool(action) {
   return function (params) {
     return run(action, params || {}).then(function (result) {
-      complete(result);
+      return finish(result);
     }).catch(function (e) {
-      complete({ success: false, message: e && e.message ? e.message : String(e) });
+      return finish({ success: false, message: e && e.message ? e.message : String(e) });
     });
   };
 }
@@ -258,8 +291,7 @@ async function analyzeChat(params) {
             } catch (e) {}
         }
         if (!chatId) {
-            complete({ success: false, message: '没有找到对话' });
-            return;
+            return finish({ success: false, message: '没有找到对话' });
         }
         // 取对话消息（限 200 条防超长）
         var messages = [];
@@ -268,8 +300,7 @@ async function analyzeChat(params) {
             if (msgResult && msgResult.messages) messages = msgResult.messages;
         } catch (e) {}
         if (messages.length === 0) {
-            complete({ success: false, message: '对话内容为空' });
-            return;
+            return finish({ success: false, message: '对话内容为空' });
         }
         // 拼 chat_text（过滤附件）
         var lines = [];
@@ -284,8 +315,7 @@ async function analyzeChat(params) {
         var chat_text = lines.join('\n');
         if (chat_text.length > 20000) chat_text = chat_text.substring(0, 20000) + '...（截断）';
         if (chat_text.length < 10) {
-            complete({ success: false, message: '对话内容过短' });
-            return;
+            return finish({ success: false, message: '对话内容过短' });
         }
         // 读 LLM 配置（沿用旧 env）
         var rawEndpoint = '';
@@ -297,8 +327,7 @@ async function analyzeChat(params) {
         var model = '';
         try { model = getEnv('MEMORY_SYSTEM_MODEL') || 'gpt-4o-mini'; } catch (e) {}
         if (!endpoint || !apiKey) {
-            complete({ success: false, message: '未配置 API Endpoint 或 Key（请在设置中配置 MEMORY_SYSTEM_*）' });
-            return;
+            return finish({ success: false, message: '未配置 API Endpoint 或 Key（请在设置中配置 MEMORY_SYSTEM_*）' });
         }
         // 传给 worker 分析（CLI 一次性调用）
         var result = await run('analyze_chat', {
@@ -309,9 +338,9 @@ async function analyzeChat(params) {
             character_id: (params && params.character_id) || undefined,
             persona_name: (params && params.persona_name) || ''
         });
-        complete(result);
+        return finish(result);
     } catch (e) {
-        complete({ success: false, message: '分析异常: ' + (e.message || String(e)) });
+        return finish({ success: false, message: '分析异常: ' + (e.message || String(e)) });
     }
 }
 exports.analyze_chat = analyzeChat;
@@ -348,34 +377,32 @@ async function diagEngine(params) {
         } catch (e) { /* engine.log 可能尚未生成 */ }
 
         out.worker_up = out.process_count > 0;
-        complete({ success: true, diag: out });
+        return finish({ success: true, diag: out });
     } catch (e) {
-        complete({ success: false, message: '诊断异常: ' + (e.message || String(e)) });
+        return finish({ success: false, message: '诊断异常: ' + (e.message || String(e)) });
     }
 }
 exports.diag_engine = diagEngine;
 
 // ===== deploy_*：通过 worker CLI 一次性调用 =====
 function deployStatus(params) {
-  run('deploy_status', params || {}).then(function (result) {
-    complete(result);
+  return run('deploy_status', params || {}).then(function (result) {
+    return finish(result);
   }).catch(function (e) {
-    complete({ success: false, message: e && e.message ? e.message : String(e) });
+    return finish({ success: false, message: e && e.message ? e.message : String(e) });
   });
 }
-
 function deployInstall(params) {
-  run('deploy_install', params || {}).then(function (result) {
-    complete(result);
+  return run('deploy_install', params || {}).then(function (result) {
+    return finish(result);
   }).catch(function (e) {
-    complete({ success: false, message: e && e.message ? e.message : String(e) });
+    return finish({ success: false, message: e && e.message ? e.message : String(e) });
   });
 }
-
 function deployRestart(params) {
-  run('deploy_restart', params || {}).then(function (result) {
-    complete(result);
+  return run('deploy_restart', params || {}).then(function (result) {
+    return finish(result);
   }).catch(function (e) {
-    complete({ success: false, message: e && e.message ? e.message : String(e) });
+    return finish({ success: false, message: e && e.message ? e.message : String(e) });
   });
 }

@@ -69,10 +69,15 @@ function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 
 // ===== 共用：解析结果 =====
 function parseResult(r) {
+  var obj = r;
   if (typeof r === 'string') {
-    try { return JSON.parse(r); } catch(e) { return null; }
+    try { obj = JSON.parse(r); } catch(e) { return null; }
   }
-  return r;
+  // Operit 约定：subpackage 成功时结果包在 data 字段（{success:true,data:{...}}），解包一层
+  if (obj && typeof obj === 'object' && typeof obj.success === 'boolean' && 'data' in obj) {
+    return obj.data;
+  }
+  return obj;
 }
 
 exports.getTypeColor = getTypeColor;

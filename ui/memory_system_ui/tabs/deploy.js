@@ -22,16 +22,19 @@ function render(ctx) {
     busyState[1](true);
     msgState[1]('检查部署状态...');
     try {
+      // callTool 返回 JSON 字符串；parseResult 负责解析 + 解包 data 字段
       var raw = await ctx.callTool('memory_engine:deploy_status', {});
+      try { if (typeof console !== 'undefined' && console.log) console.log('[deploy_status] RAW=' + JSON.stringify(raw)); } catch (e) {}
       var r = parseResult(raw);
       if (r && r.success) {
-        statusState[1](r.status || {});
+        var s = r.status || r.data || {};
+        statusState[1](s);
         msgState[1]('');
       } else {
-        msgState[1]('状态检查失败：' + ((r && r.message) || '未知错误'));
+        msgState[1]('状态检查失败：' + ((r && (r.message || r.error)) || '未知错误'));
       }
     } catch (e) {
-      msgState[1]('状态检查异常：' + (e.message || String(e)));
+      msgState[1]('状态检查失败：' + (e.message || String(e)));
     }
     busyState[1](false);
   }
