@@ -18,16 +18,39 @@ SQLite 数据层 + CRUD + 语义去重 + 角色隔离。
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
 import time
 import unicodedata
+from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+# ===== 方案 A：向量能力（可选，sqlite-vec + onnxruntime + BGE）=====
+# 模型/扩展缺失时自动降级方案 B（文本相似度）
+VEC_AVAILABLE = False
+_embedder = None
+
+try:
+    import sqlite_vec  # noqa: F401
+    VEC_AVAILABLE = True
+except Exception:
+    VEC_AVAILABLE = False
+
+try:
+    from embed import Embedder, cosine_sim
+    _embedder = None  # 惰性初始化
+except Exception:
+    _embedder = None
+
 VERSION = "0.1.0"
 DB_PATH = "/root/character_memory_engine/engine.db"
+MODEL_DIR = "/root/character_memory_engine/models"
+
+# 向量去重阈值（方案 A）：余弦 ≥ 0.9 判重复
+VEC_DEDUP_THRESHOLD = 0.9
 
 # ===== 分类定义 =====
 LIFE_CATEGORIES = ["events", "todos", "contacts", "info", "finance", "menstrual"]
@@ -41,7 +64,32 @@ def get_conn(db_path):
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    # 加载 sqlite-vec 扩展（方案 A）
+    if VEC_AVAILABLE:
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+        except Exception:
+            pass
     return conn
+
+
+def get_embedder():
+    """惰性初始化 BGE embedder；模型缺失返回 None（降级方案 B）。"""
+    global _embedder
+    if _embedder is not None:
+        return _embedder
+    if not VEC_AVAILABLE:
+        return None
+    try:
+        if not os.path.exists(os.path.join(MODEL_DIR, "model_int8.onnx")):
+            return None
+        _embedder = Embedder(MODEL_DIR)
+        return _embedder
+    except Exception as e:
+        sys.stderr.write("[engine] embedder init failed: %s\n" % str(e))
+        return None
 
 
 SCHEMA = """
@@ -93,12 +141,23 @@ CREATE INDEX IF NOT EXISTS idx_mem_category ON memories(category);
 CREATE INDEX IF NOT EXISTS idx_mem_character ON memories(character_id);
 CREATE INDEX IF NOT EXISTS idx_mem_updated ON memories(updated_at);
 CREATE INDEX IF NOT EXISTS idx_mem_hash ON memories(semantic_hash);
+
+-- 方案 A：向量虚拟表（sqlite-vec），rowid 对应 memories.id，cosine 度量
+CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512] distance_metric=cosine);
 """
 
 
 def init_db(db_path):
     conn = get_conn(db_path)
     conn.executescript(SCHEMA)
+    # 若 vec0 不可用（无 sqlite-vec），跳过虚拟表创建
+    try:
+        conn.execute("SELECT COUNT(*) FROM vec_items")
+    except Exception:
+        try:
+            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512] distance_metric=cosine)")
+        except Exception:
+            pass
     conn.commit()
     conn.close()
 
@@ -191,6 +250,117 @@ def dedup_similar(conn, category, title, content, character_id, threshold=None):
     if best and best_score >= threshold:
         return best, best_score
     return None, best_score
+
+
+def vec_dedup(conn, category, title, content, character_id):
+    """方案 A：用 BGE 向量查库内近邻，余弦 >= VEC_DEDUP_THRESHOLD 判重复。
+
+    返回最相似的已有记忆行或 None。"""
+    if not VEC_AVAILABLE:
+        return None
+    embedder = get_embedder()
+    if embedder is None:
+        return None
+    probe = (title or "") + " " + (content or "")
+    try:
+        vec = embedder.embed(probe, is_query=False)
+        vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+        # 查 vec0 近邻（注意：vec0 不分角色，需在 memories 里二次过滤）
+        rows = conn.execute(
+            "SELECT rowid, distance FROM vec_items WHERE embedding MATCH ? AND k=20",
+            (vec_str,),
+        ).fetchall()
+        best_id = None
+        best_score = 0.0
+        for r in rows:
+            dist = float(r["distance"])
+            sim = 1.0 - dist  # vec0 cosine metric：distance 即余弦距离
+            if sim < best_score:
+                continue
+            # 过滤分类与角色隔离
+            mem = conn.execute(
+                "SELECT * FROM memories WHERE id=? AND is_deleted=0",
+                (r["rowid"],),
+            ).fetchone()
+            if not mem:
+                continue
+            if mem["category"] != category:
+                continue
+            if character_id:
+                if mem["character_id"] != character_id:
+                    continue
+            else:
+                if mem["character_id"]:
+                    continue
+            best_score = sim
+            best_id = r["rowid"]
+        if best_id is not None and best_score >= VEC_DEDUP_THRESHOLD:
+            return conn.execute("SELECT * FROM memories WHERE id=?", (best_id,)).fetchone()
+        return None
+    except Exception as e:
+        sys.stderr.write("[engine] vec_dedup error: %s\n" % str(e))
+        return None
+
+
+def search_memories(conn, params):
+    """语义检索：query 向量 + 关键词 + 角色过滤，返回排序结果。
+
+    方案 A：向量近邻为主；方案 B（无向量）：仅关键词。
+    """
+    character_id = params.get("character_id")
+    category = params.get("category")
+    query = params.get("query") or ""
+    limit = int(params.get("limit") or 20)
+    if not query:
+        return {"success": True, "memories": [], "total": 0}
+
+    results = []
+    embedder = get_embedder()
+    if embedder is not None:
+        try:
+            vec = embedder.embed(query, is_query=True)
+            vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+            rows = conn.execute(
+                "SELECT rowid, distance FROM vec_items WHERE embedding MATCH ? AND k=?", (vec_str, limit * 3),
+            ).fetchall()
+            for r in rows:
+                mem = conn.execute(
+                    "SELECT * FROM memories WHERE id=? AND is_deleted=0", (r["rowid"],),
+                ).fetchone()
+                if not mem:
+                    continue
+                if character_id:
+                    if mem["character_id"] != character_id:
+                        continue
+                else:
+                    if mem["character_id"]:
+                        continue
+                if category and mem["category"] != category:
+                    continue
+                sim = 1.0 - float(r["distance"])
+                results.append((sim, mem))
+            results.sort(key=lambda x: -x[0])
+        except Exception as e:
+            sys.stderr.write("[engine] search vec error: %s\n" % str(e))
+
+    # 无向量或结果不足时，关键词兜底
+    if not results:
+        like = "%" + query + "%"
+        sql = "SELECT * FROM memories WHERE is_deleted=0 AND (title LIKE ? OR content LIKE ? OR description LIKE ?)"
+        args = [like, like, like]
+        if character_id:
+            sql += " AND character_id=?"
+            args.append(str(character_id))
+        else:
+            sql += " AND (character_id IS NULL OR character_id='')"
+        if category:
+            sql += " AND category=?"
+            args.append(str(category))
+        rows = conn.execute(sql + " ORDER BY updated_at DESC LIMIT ?", args + [limit]).fetchall()
+        results = [(1.0, r) for r in rows]
+
+    results = results[:limit]
+    return {"success": True, "memories": [row_to_obj(r) for _s, r in results], "total": len(results)}
 
 
 # ===== 行 <-> 前端对象映射 =====
@@ -326,9 +496,10 @@ def create_memory(conn, params):
     ).fetchone()
     if not existing:
         # 方案 B 近似语义去重：精确 hash 未命中，再比对文本相似度
-        existing, sim = dedup_similar(conn, category, title, content, character_id)
-        if existing is None:
-            existing = None
+        existing, _sim = dedup_similar(conn, category, title, content, character_id)
+    if not existing:
+        # 方案 A 向量去重：文本相似度未命中，用 BGE 向量查库内近邻
+        existing = vec_dedup(conn, category, title, content, character_id)
     if existing:
         conn.execute(
             "UPDATE memories SET updated_at=?, title=?, content=?, description=? WHERE id=?",
@@ -357,6 +528,16 @@ def create_memory(conn, params):
     )
     conn.commit()
     mid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+    # 方案 A：新建后生成向量并存入 vec_items
+    embedder = get_embedder()
+    if embedder is not None:
+        try:
+            vec = embedder.embed((title or "") + " " + (content or ""), is_query=False)
+            vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+            conn.execute("INSERT OR REPLACE INTO vec_items(rowid, embedding) VALUES (?, ?)", (mid, vec_str))
+            conn.commit()
+        except Exception as e:
+            sys.stderr.write("[engine] embed write failed: %s\n" % str(e))
     row = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
     return {"success": True, "memory": row_to_obj(row), "deduped": False}
 
@@ -593,6 +774,7 @@ ACTIONS = {
     "delete_memory": delete_memory,
     "bulk_update_memories": bulk_update_memories,
     "bulk_delete_memories": bulk_delete_memories,
+    "search_memories": search_memories,
     "load_life_data": load_life_data,
     "upsert_life_item": upsert_life_item,
     "delete_life_item": delete_life_item,
