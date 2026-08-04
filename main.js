@@ -150,7 +150,8 @@ async function doEnsureWorkerRunning() {
         jsLog('INFO', 'ensureWorkerRunning: 已清理旧 worker 进程');
 
         // 5) 启动 worker（后台，在 worker 所在目录运行，日志重定向到 /tmp/engine_worker.log）
-        var cmd = 'cd ' + workerDir + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
+        // 参考 dual-life-hub：清 PYTHONHOME/PYTHONPATH，固定 LC_ALL/LANG，避免 proot 环境变量干扰 python
+        var cmd = 'cd ' + workerDir + ' && env -u PYTHONHOME -u PYTHONPATH PYTHONUTF8=1 LC_ALL=C LANG=C nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
         jsLog('INFO', 'ensureWorkerRunning: 启动 worker -> ' + cmd);
         try {
             await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: 15000 });

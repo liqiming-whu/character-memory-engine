@@ -55,7 +55,7 @@ function render(ctx) {
   async function loadLogs() {
     logLoadingState[1](true);
     try {
-      var raw = await ctx.callTool('memory_engine:get_logs', { limit: 50, level: logFilterState[0] || '' });
+      var raw = await ctx.callTool('memory_engine:get_logs', { limit: 300, level: logFilterState[0] || '' });
       var r = parseResult(raw);
       if (r && r.success) {
         logState[1]({ lines: r.log || [], path: r.path || '' });
@@ -127,7 +127,7 @@ function render(ctx) {
   ]));
   items.push(UI.Spacer({ height: 8 }));
   items.push(UI.Row({ fillMaxWidth: true, spacing: 8 }, [
-    actionBtn(logLoadingState[0] ? '加载中...' : '查看日志(50)', 'receipt_long', colors.secondaryContainer, colors.secondary, loadLogs),
+    actionBtn(logLoadingState[0] ? '加载中...' : '查看日志', 'receipt_long', colors.secondaryContainer, colors.secondary, loadLogs),
     actionBtn('诊断', 'bug_report', colors.errorContainer, colors.error, runDiagnosis),
   ]));
   items.push(UI.Spacer({ height: 8 }));

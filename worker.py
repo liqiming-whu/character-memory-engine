@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -76,24 +76,18 @@ ALL_CATEGORIES = LIFE_CATEGORIES + ROLE_CATEGORIES
 
 
 # ===== 日志 =====
-# 写 <数据目录>/logs/engine.log（真机：/sdcard/Download/character_memory_engine/logs/engine.log），
-# 用户无需 root 即可访问，可被插件 get_logs 读取。env MEMORY_ENGINE_LOG 可覆盖路径。
+# 写 <数据目录>/logs/engine.log（真机：/sdcard/Download/Operit/character_memory_engine/logs/engine.log）。
+# 参考 dual-life-hub：纯 append 不轮转，保证历史完整可查。
 _LOG_LOCK = threading.Lock()
 LOG_PATH = os.environ.get("MEMORY_ENGINE_LOG", os.path.join(DATA_DIR, "logs", "engine.log"))
-LOG_MAX_BYTES = 1024 * 1024  # 超 1MB 轮转为 engine.log.1
 
 
 def log(level, msg):
-    """写日志文件（线程安全、超限轮转），同时写 stderr 保留 /tmp 次要捕获。"""
+    """写日志文件（线程安全、纯追加，保留全部历史），同时写 stderr 保留 /tmp 次要捕获。"""
     line = "%s %-5s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), msg)
     try:
         with _LOG_LOCK:
             os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-            if os.path.exists(LOG_PATH) and os.path.getsize(LOG_PATH) > LOG_MAX_BYTES:
-                try:
-                    os.replace(LOG_PATH, LOG_PATH + ".1")
-                except Exception:
-                    pass
             with open(LOG_PATH, "a", encoding="utf-8") as f:
                 f.write(line)
         sys.stderr.write(line)
@@ -907,8 +901,11 @@ def log_event(conn, params):
 
 
 def get_logs(conn, params):
-    """读日志文件尾部 N 行，可选按级别过滤，供前端/调试查看。"""
-    n = int(params.get("limit") or 50)
+    """读日志文件尾部 N 行，可选按级别过滤，供前端/调试查看。
+
+    纯追加无轮转，直接从主文件读。limit 默认 300，可从尾部回溯较多历史。
+    """
+    n = int(params.get("limit") or 300)
     level = str(params.get("level") or "").upper()
     path = params.get("path") or LOG_PATH
     try:
@@ -917,7 +914,7 @@ def get_logs(conn, params):
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             f.seek(0, os.SEEK_END)
             size = f.tell()
-            f.seek(max(0, size - 128 * 1024))
+            f.seek(max(0, size - 1024 * 1024))
             tail = f.read()
         lines = tail.splitlines()
         # 若首行是 seek 边界截断的半行，丢弃它（读到的是不完整行）
