@@ -985,6 +985,128 @@ def import_legacy_backup(conn, params):
                 pass
 
 
+def backup_engine(conn, params):
+    """导出 SQLite 数据库 + 配置到 ZIP（存到 {ENGINE_DIR}/backups/）。"""
+    import zipfile
+    import shutil
+    try:
+        db_path = _current_db_path(conn)
+        bkp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
+        os.makedirs(bkp_dir, exist_ok=True)
+
+        ts = int(time.time() * 1000)
+        zip_name = "engine_" + str(ts) + ".zip"
+        zip_path = os.path.join(bkp_dir, zip_name)
+
+        # 导出 db 到临时文件（用 backup API 保证一致性）
+        tmp_dir = os.path.join(bkp_dir, ".stage_" + str(ts))
+        os.makedirs(tmp_dir, exist_ok=True)
+        export_db = os.path.join(tmp_dir, "engine.db")
+        dest = sqlite3.connect(export_db)
+        conn.backup(dest)
+        dest.close()
+
+        # 附带 UI 状态
+        ui_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+        manifest = {
+            "format": "character-memory-engine-backup",
+            "version": 1,
+            "createdAt": ts,
+            "reason": str(params.get("reason") or "manual")[:80],
+            "files": ["engine.db"]
+        }
+        with open(os.path.join(tmp_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
+        if os.path.exists(ui_state):
+            shutil.copy(ui_state, os.path.join(tmp_dir, "last_ui_state.json"))
+
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for fn in os.listdir(tmp_dir):
+                zf.write(os.path.join(tmp_dir, fn), fn)
+
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return {"success": True, "path": zip_path, "fileName": zip_name, "createdAt": ts}
+    except Exception as e:
+        return {"success": False, "message": "backup failed: " + str(e)}
+
+
+def inspect_engine(conn, params):
+    """校验 Engine 备份 ZIP。"""
+    import zipfile
+    import tempfile
+    import shutil
+    path = params.get("path") or ""
+    if not path:
+        return {"success": False, "message": "missing path"}
+    tmp = None
+    try:
+        if not os.path.exists(path):
+            return {"success": False, "message": "backup not found"}
+        tmp = tempfile.mkdtemp(prefix="engine_inspect_")
+        with zipfile.ZipFile(path) as zf:
+            zf.extractall(tmp)
+        mf = os.path.join(tmp, "manifest.json")
+        if not os.path.exists(mf):
+            return {"success": False, "valid": False, "message": "missing manifest"}
+        with open(mf, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("format") != "character-memory-engine-backup" or manifest.get("version") != 1:
+            return {"success": False, "valid": False, "message": "invalid backup format"}
+        db_ok = os.path.exists(os.path.join(tmp, "engine.db"))
+        return {"success": True, "valid": db_ok, "version": manifest["version"], "createdAt": manifest.get("createdAt"), "reason": manifest.get("reason"), "fileCount": len(manifest.get("files") or [])}
+    except Exception as e:
+        return {"success": False, "message": "inspect failed: " + str(e)}
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+def restore_engine(conn, params):
+    """从 Engine 备份恢复（覆盖当前 db）。"""
+    import zipfile
+    import tempfile
+    import shutil
+    path = params.get("path") or ""
+    mode = params.get("mode") or "merge"
+    if not path:
+        return {"success": False, "message": "missing path"}
+    tmp = None
+    try:
+        if not os.path.exists(path):
+            return {"success": False, "message": "backup not found"}
+        tmp = tempfile.mkdtemp(prefix="engine_restore_")
+        with zipfile.ZipFile(path) as zf:
+            zf.extractall(tmp)
+        mf = os.path.join(tmp, "manifest.json")
+        if not os.path.exists(mf):
+            return {"success": False, "message": "missing manifest"}
+        with open(mf, "r", encoding="utf-8") as f:
+            manifest = json.load(f)
+        if manifest.get("format") != "character-memory-engine-backup":
+            return {"success": False, "message": "invalid backup format"}
+
+        db_path = _current_db_path(conn)
+        src_db = os.path.join(tmp, "engine.db")
+        if not os.path.exists(src_db):
+            return {"success": False, "message": "backup missing engine.db"}
+
+        # 备份前保护当前 db
+        conn.close()
+        protect = db_path + ".pre_restore.bak"
+        try:
+            shutil.copy(db_path, protect)
+        except Exception:
+            pass
+        shutil.copy(src_db, db_path)
+        return {"success": True, "mode": mode, "restoredAt": int(time.time() * 1000), "protection": protect}
+    except Exception as e:
+        return {"success": False, "message": "restore failed: " + str(e)}
+    finally:
+        if tmp:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+
 # ===== 路由 =====
 ACTIONS = {
     "list_memories": list_memories,
@@ -1008,6 +1130,9 @@ ACTIONS = {
     "deploy_install": deploy_install,
     "deploy_restart": deploy_restart,
     "save_ui_state": save_ui_state,
+    "backup_engine": backup_engine,
+    "inspect_engine": inspect_engine,
+    "restore_engine": restore_engine,
     "ping_worker": ping_worker,
 }
 
@@ -1046,6 +1171,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[engine] %s\n" % (fmt % args))
+
+
+# ===== 备份 / 恢复（Engine 格式：SQLite db + 配置打包 ZIP）=====
+def _current_db_path(conn):
+    """从连接获取当前 db 文件路径。"""
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        if row and row["file"]:
+            return row["file"]
+    except Exception:
+        pass
+    return os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db"))
 
 
 def main():

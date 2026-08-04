@@ -439,10 +439,10 @@ loadingChatsState[1](false);
     backupBusyState[1](true);
     backupResultState[1]('🔄 正在导出备份...');
     try {
-      var raw = await ctx.callTool('memory_system:export_backup', { reason: 'manual' });
+      var raw = await ctx.callTool('memory_engine:backup_engine', { reason: 'manual' });
       var r = parseResult(raw);
       if (r && r.success) {
-        backupResultState[1]('✅ 备份已导出：' + (r.fileName || '') + '（' + (r.fileCount || 0) + ' 个文件）\n路径：' + (r.path || ''));
+        backupResultState[1]('✅ 备份已导出：' + (r.fileName || '') + '\n路径：' + (r.path || ''));
       } else {
         backupResultState[1]('❌ ' + ((r && r.message) || '导出失败'));
       }
@@ -475,15 +475,15 @@ loadingChatsState[1](false);
       }
       var filePath = file.path || file.uri || '';
       backupResultState[1]('🔄 正在校验备份...');
-      var inspRaw = await ctx.callTool('memory_system:inspect_backup', { path: filePath });
+      var inspRaw = await ctx.callTool('memory_engine:inspect_engine', { path: filePath });
       var insp = parseResult(inspRaw);
       if (!insp || !insp.success || insp.valid !== true) {
         backupResultState[1]('❌ 备份校验失败：' + ((insp && insp.message) || '文件损坏或格式不正确'));
         backupBusyState[1](false);
         return;
       }
-      backupResultState[1]('🔄 备份有效（' + (insp.fileCount || 0) + ' 个文件），正在恢复（' + (backupModeState[0] === 'overwrite' ? '覆盖' : '合并') + '模式）...');
-      var resRaw = await ctx.callTool('memory_system:restore_backup', { path: filePath, mode: backupModeState[0] });
+      backupResultState[1]('🔄 备份有效，正在恢复（' + (backupModeState[0] === 'overwrite' ? '覆盖' : '合并') + '模式）...');
+      var resRaw = await ctx.callTool('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
       var res = parseResult(resRaw);
       if (res && res.success) {
         backupResultState[1]('✅ 恢复完成（' + res.mode + ' 模式，' + (res.fileCount || 0) + ' 个文件）');

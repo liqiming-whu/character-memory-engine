@@ -75,6 +75,16 @@ METADATA
         { "name": "save_ui_state", "description": { "zh": "保存界面状态", "en": "Save UI state" }, "parameters": [
             { "name": "state_json", "type": "string", "required": true, "description": "界面状态JSON" }
         ]},
+        { "name": "backup_engine", "description": { "zh": "导出引擎备份（SQLite+配置 ZIP）", "en": "Export engine backup (SQLite + config ZIP)" }, "parameters": [
+            { "name": "reason", "type": "string", "required": false, "description": "备份原因" }
+        ]},
+        { "name": "inspect_engine", "description": { "zh": "校验引擎备份", "en": "Validate engine backup" }, "parameters": [
+            { "name": "path", "type": "string", "required": true, "description": "备份ZIP路径" }
+        ]},
+        { "name": "restore_engine", "description": { "zh": "从引擎备份恢复", "en": "Restore from engine backup" }, "parameters": [
+            { "name": "path", "type": "string", "required": true, "description": "备份ZIP路径" },
+            { "name": "mode", "type": "string", "required": false, "description": "merge 或 overwrite" }
+        ]},
         { "name": "save_relationship", "description": { "zh": "保存关系", "en": "Save relationship" }, "parameters": [
             { "name": "character_id", "type": "string", "required": true, "description": "角色卡ID" },
             { "name": "target", "type": "string", "required": true, "description": "关系对象" },
@@ -148,4 +158,7 @@ exports.deploy_status = makeTool("deploy_status");
 exports.deploy_install = makeTool("deploy_install");
 exports.deploy_restart = makeTool("deploy_restart");
 exports.save_ui_state = makeTool("save_ui_state");
+exports.backup_engine = makeTool("backup_engine");
+exports.inspect_engine = makeTool("inspect_engine");
+exports.restore_engine = makeTool("restore_engine");
 exports.ping_worker = makeTool("ping_worker");
