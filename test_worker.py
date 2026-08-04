@@ -50,13 +50,18 @@ r = handle("create_memory", {"category": "info", "title": "用户习惯", "conte
 check("重复内容合并 deduped=True", r["success"] and r["deduped"] is True)
 r = handle("list_memories", {"category": "info"})
 check("合并后不新增（info 仍 1 条）", r["total"] == 1)
-# 近似语义（不同文本）→ 不合并（方案 B 限制，需向量去重 P4 补强）
+# 近似语义（不同文本但近义）→ 文本相似度合并（方案 B 增强）
 r = handle("create_memory", {"category": "info", "title": "用户习惯", "content": "启明从不抽烟喝酒"})
-check("近似语义当前不合并（方案B限制）", r["success"] and r["deduped"] is False)
-# 清理此条，避免污染后续
+check("近似语义文本相似度合并", r["success"] and r["deduped"] is True)
+r = handle("list_memories", {"category": "info"})
+check("近似合并后不新增（info 仍 1 条）", r["total"] == 1)
+# 语义无关 → 不合并
+r = handle("create_memory", {"category": "info", "title": "通用", "content": "启明今天去了健身房"})
+check("语义无关不合并", r["success"] and r["deduped"] is False)
+# 清理无关条，避免污染后续
 r = handle("list_memories", {"category": "info"})
 for m in r["memories"]:
-    if m["content"] == "启明从不抽烟喝酒":
+    if m["content"] == "启明今天去了健身房":
         handle("delete_memory", {"id": m["id"]})
 
 print("== 3. 角色隔离 ==")

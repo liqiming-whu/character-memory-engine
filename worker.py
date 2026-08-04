@@ -118,6 +118,81 @@ def semantic_hash(category, title, content, character_id):
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+# ===== 文本相似度（方案 B 近似语义去重）=====
+def text_similarity(a, b):
+    """基于字符 n-gram Jaccard + 公共字符 + 包含关系的混合相似度，返回 0~1。"""
+    a = normalize_text(a)
+    b = normalize_text(b)
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    # 字符 2-gram Jaccard
+    def ngrams(s, n):
+        return {s[i:i+n] for i in range(len(s) - n + 1)} if len(s) >= n else {s}
+    ga = ngrams(a, 2)
+    gb = ngrams(b, 2)
+    inter = len(ga & gb)
+    union = len(ga | gb)
+    jaccard = inter / union if union else 0.0
+    # 公共字符比例（多集）：中文近义句通常共享大量字符
+    from collections import Counter
+    ca = Counter(a)
+    cb = Counter(b)
+    common_chars = sum((ca & cb).values())
+    char_ratio = common_chars / max(len(a), len(b), 1)
+    # 长度比
+    lmin = min(len(a), len(b))
+    lmax = max(len(a), len(b))
+    len_ratio = lmin / lmax if lmax else 0.0
+    # 包含关系（短串是长串子串）
+    contain = 0.0
+    if len(a) <= len(b):
+        if a in b:
+            contain = len(a) / len(b)
+    else:
+        if b in a:
+            contain = len(b) / len(a)
+    # 加权混合：公共字符为主（对中文近义敏感），Jaccard 补充
+    score = 0.5 * char_ratio + 0.3 * jaccard + 0.1 * len_ratio + 0.1 * contain
+    if contain > 0.5:
+        score = max(score, 0.6 * contain + 0.4 * char_ratio)
+    return max(0.0, min(1.0, score))
+
+
+# ===== 语义去重阈值 =====
+# 方案 B（文本相似度）近似去重阈值：中文近似句通常 0.6-0.85，无关句 <0.3
+# 0.7 在「近似合并」与「无关分离」间取平衡；可配置
+DEDUP_SIM_THRESHOLD = 0.7
+
+
+def dedup_similar(conn, category, title, content, character_id, threshold=None):
+    """近似语义去重：与库内同分类条目比对，返回最相似的已有记忆或 None。
+
+    返回 (existing_row, similarity)。"""
+    if threshold is None:
+        threshold = DEDUP_SIM_THRESHOLD
+    if not title and not content:
+        return None, 0.0
+    probe = (title or "") + " " + (content or "")
+    rows = conn.execute(
+        "SELECT * FROM memories WHERE category=? AND is_deleted=0"
+        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')"),
+        ([category] + [str(character_id)] if character_id else [category]),
+    ).fetchall()
+    best = None
+    best_score = 0.0
+    for row in rows:
+        existing = (row["title"] or "") + " " + (row["content"] or "")
+        score = text_similarity(probe, existing)
+        if score > best_score:
+            best_score = score
+            best = row
+    if best and best_score >= threshold:
+        return best, best_score
+    return None, best_score
+
+
 # ===== 行 <-> 前端对象映射 =====
 # 前端期望的 JSON 字段（驼峰），与旧 memory_system 一致
 ROW_TO_FRONT = {
@@ -249,6 +324,11 @@ def create_memory(conn, params):
     existing = conn.execute(
         "SELECT * FROM memories WHERE semantic_hash=? AND is_deleted=0", (h,)
     ).fetchone()
+    if not existing:
+        # 方案 B 近似语义去重：精确 hash 未命中，再比对文本相似度
+        existing, sim = dedup_similar(conn, category, title, content, character_id)
+        if existing is None:
+            existing = None
     if existing:
         conn.execute(
             "UPDATE memories SET updated_at=?, title=?, content=?, description=? WHERE id=?",
