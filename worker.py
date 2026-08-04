@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "1.2.4"
+VERSION = "2.0.0"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -1611,7 +1611,25 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--db", default=DB_PATH)
+    # 一次性 CLI 模式（参考 dual-life-hub）：--cli ACTION PAYLOAD_FILE
+    parser.add_argument("--cli", nargs=2, metavar=("ACTION", "PAYLOAD_FILE"))
     args = parser.parse_args()
+
+    if args.cli:
+        # CLI 一次性调用：读 payload 文件 → handle_action → 输出 MARKER+JSON 行
+        action, payload_file = args.cli
+        MARKER = "__LIFE_HUB_JSON__"
+        try:
+            payload = {}
+            if os.path.exists(payload_file):
+                with open(payload_file, "r", encoding="utf-8") as f:
+                    payload = json.load(f) or {}
+            result = handle_action(args.db, action, payload)
+            line = MARKER + json.dumps(result, ensure_ascii=False)
+            print(line, flush=True)
+        except Exception as e:
+            print(MARKER + json.dumps({"success": False, "message": "cli error: " + str(e)}, ensure_ascii=False), flush=True)
+        return
 
     Path(args.db).parent.mkdir(parents=True, exist_ok=True)
     init_db(args.db)

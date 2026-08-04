@@ -107,85 +107,157 @@ METADATA
 }
 */
 
-// Worker HTTP 地址（可经 env 覆盖）
-function workerUrl() {
-    var u = '';
-    try { u = getEnv('MEMORY_ENGINE_WORKER_URL') || ''; } catch (e) {}
-    return u || 'http://127.0.0.1:8765';
+// ===== 一次性 CLI 调用架构（参考 dual-life-hub）=====
+// 每次操作：部署 worker → 写 payload.json → bash -lc 调 python worker.py --cli action payload
+// → 解析 __LIFE_HUB_JSON__ 标记行。不做常驻 HTTP，避免端口/进程/连接状态问题。
+
+var LINUX_DIR = '/root/character_memory_engine';
+var WORKER_PATH = LINUX_DIR + '/worker.py';
+var MARKER = '__LIFE_HUB_JSON__';
+var _deployed = false;
+var _queue = Promise.resolve();
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
-// 写日志：经 worker log_event 落到 engine.log（fire-and-forget，失败不影响业务）
-function logLocal(level, msg) {
+function withTimeout(promise, ms, message) {
+  var timer;
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      timer = setTimeout(function () { reject(new Error(message || "操作超时。")); }, ms);
+    })
+  ]).finally(function () { clearTimeout(timer); });
+}
+
+// 部署 worker.py + embed.py + models（正确用法：await ToolPkg.readResource(key)，签名 (key, outputFileName, internal)）
+async function ensureWorker() {
+  if (_deployed) return WORKER_PATH;
+  try {
+    await withTimeout(Tools.Files.mkdir(LINUX_DIR, true, "linux"), 8000, "创建运行目录超时。");
+    // 部署 worker.py
+    var resource = await withTimeout(
+      ToolPkg.readResource("engine_worker_py", "engine_worker_public.py"),
+      10000,
+      "读取 worker 程序超时。"
+    );
+    if (!resource) throw new Error("worker 程序资源缺失。");
+    await withTimeout(
+      Tools.Files.copy(String(resource), WORKER_PATH, false, "android", "linux"),
+      10000,
+      "部署 worker 程序超时。"
+    );
+    // 部署 embed.py（worker 依赖 from embed import Embedder）
     try {
-        Tools.Net.http({
-            url: workerUrl(),
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'log_event', params: { level: level, message: msg } }),
-            connect_timeout: 2000,
-            read_timeout: 2000,
-            ignore_ssl: true
-        }).catch(function() {});
+      var embedSrc = await ToolPkg.readResource("engine_embed_py", "engine_embed_public.py");
+      if (embedSrc) {
+        await Tools.Files.copy(String(embedSrc), LINUX_DIR + "/embed.py", false, "android", "linux");
+      }
     } catch (e) {}
+    // 部署 models（worker 用 _SCRIPT_DIR/models 探测）
+    try {
+      await Tools.Files.mkdir(LINUX_DIR + "/models", true, "linux");
+      var modelFiles = [
+        ["engine_model_config", "config.json"],
+        ["engine_model_onnx", "model_int8.onnx"],
+        ["engine_model_tokenizer", "tokenizer.json"]
+      ];
+      for (var mi = 0; mi < modelFiles.length; mi++) {
+        try {
+          var mSrc = await ToolPkg.readResource(modelFiles[mi][0], "engine_" + modelFiles[mi][1]);
+          if (mSrc) {
+            await Tools.Files.copy(String(mSrc), LINUX_DIR + "/models/" + modelFiles[mi][1], false, "android", "linux");
+          }
+        } catch (e) {}
+      }
+    } catch (e) {}
+    _deployed = true;
+  } catch (e) {
+    throw e;
+  }
+  return WORKER_PATH;
 }
 
-// 调 worker：POST JSON { action, params }
-async function callEngine(action, params) {
-    var url = workerUrl();
-    try {
-        var response = await Tools.Net.http({
-            url: url,
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: action, params: params || {} }),
-            connect_timeout: 5000,
-            read_timeout: 60000,
-            ignore_ssl: true
-        });
-        var body = '';
-        if (typeof response === 'string') body = response;
-        else if (response && response.body) body = typeof response.body === 'string' ? response.body : JSON.stringify(response.body);
-        else if (response && response.content) body = response.content;
-        if (!body) {
-            logLocal('ERROR', 'callEngine ' + action + ': worker 无响应');
-            return { success: false, message: 'worker 无响应' };
-        }
-        return JSON.parse(body);
-    } catch (e) {
-        // worker 可能刚启动尚未就绪：等 1.5s 重试一次（应用冷启动首批调用常见）
-        logLocal('DEBUG', 'callEngine ' + action + ' 首次失败，1.5s 后重试: ' + (e.message || String(e)));
-        await new Promise(function (res) { setTimeout(res, 1500); });
-        try {
-            var retry = await Tools.Net.http({
-                url: url,
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ action: action, params: params || {} }),
-                connect_timeout: 5000,
-                read_timeout: 60000,
-                ignore_ssl: true
-            });
-            var rbody = '';
-            if (typeof retry === 'string') rbody = retry;
-            else if (retry && retry.body) rbody = typeof retry.body === 'string' ? retry.body : JSON.stringify(retry.body);
-            else if (retry && retry.content) rbody = retry.content;
-            if (rbody) return JSON.parse(rbody);
-        } catch (e2) {}
-        logLocal('ERROR', 'callEngine ' + action + ': ' + (e.message || String(e)));
-        return { success: false, message: 'worker 调用失败: ' + (e.message || String(e)), action: action };
-    }
+function parseCliOutput(result) {
+  var output = String(result && result.output || "");
+  var pos = output.lastIndexOf(MARKER);
+  if (pos < 0) {
+    throw new Error("worker 没有返回有效结果。\n" + output.slice(-1000));
+  }
+  var line = output.slice(pos + MARKER.length).split(/\r?\n/)[0].trim();
+  var parsed;
+  try { parsed = JSON.parse(line); }
+  catch (_error) { throw new Error("worker 结果无法解析。\n" + line.slice(0, 1000)); }
+  return parsed;
+}
+
+async function execWorker(command) {
+  var terminal = Tools.System && Tools.System.terminal;
+  if (!terminal) throw new Error("Operit 未提供终端执行能力。");
+  if (typeof terminal.hiddenExec === "function") {
+    return withTimeout(
+      terminal.hiddenExec(command, { executorKey: "character_memory_engine", timeoutMs: 30000 }),
+      35000,
+      "worker 操作超时。"
+    );
+  }
+  var session = await withTimeout(
+    terminal.create("character_memory_engine_once"),
+    8000,
+    "创建终端会话超时。"
+  );
+  if (!session || !session.sessionId) throw new Error("无法创建终端会话。");
+  try {
+    return await withTimeout(
+      terminal.exec(session.sessionId, command, 30000),
+      35000,
+      "worker 操作超时。"
+    );
+  } finally {
+    try { await terminal.close(session.sessionId); } catch (_closeError) {}
+  }
+}
+
+async function runOnce(action, payload) {
+  var worker = await ensureWorker();
+  var payloadPath = LINUX_DIR + "/payload_" + Date.now() + "_" + Math.floor(Math.random() * 1000000) + ".json";
+  await withTimeout(
+    Tools.Files.write(payloadPath, JSON.stringify(payload || {}), false, "linux"),
+    8000,
+    "写入操作参数超时。"
+  );
+  try {
+    var script = [
+      "unset PYTHONHOME PYTHONPATH",
+      "export PYTHONUTF8=1 LC_ALL=C LANG=C",
+      "python_bin=\"$(command -v python3 2>/dev/null || true)\"",
+      "[ -n \"$python_bin\" ] || { echo 'python3 not found'; exit 127; }",
+      "\"$python_bin\" " + shellQuote(worker) + " --cli " + shellQuote(String(action)) + " " + shellQuote(payloadPath)
+    ].join("; ");
+    var result = await execWorker("bash -lc " + shellQuote(script));
+    return parseCliOutput(result);
+  } finally {
+    try { await Tools.Files.deleteFile(payloadPath, false, "linux"); } catch (_deleteError) {}
+  }
+}
+
+function run(action, payload) {
+  var task = function () { return runOnce(action, payload || {}); };
+  var current = _queue.then(task, task);
+  _queue = current.catch(function () {});
+  return current;
 }
 
 // 工具导出：显式 exports（Operit subpackage 解析器识别显式导出名）
 function makeTool(action) {
-    return async function (params) {
-        try {
-            var result = await callEngine(action, params || {});
-            complete(result);
-        } catch (e) {
-            complete({ success: false, message: e.message || String(e) });
-        }
-    };
+  return function (params) {
+    return run(action, params || {}).then(function (result) {
+      complete(result);
+    }).catch(function (e) {
+      complete({ success: false, message: e && e.message ? e.message : String(e) });
+    });
+  };
 }
 
 exports.list_memories = makeTool("list_memories");
@@ -276,8 +348,8 @@ async function analyzeChat(params) {
             complete({ success: false, message: '未配置 API Endpoint 或 Key（请在设置中配置 MEMORY_SYSTEM_*）' });
             return;
         }
-        // 传给 worker 分析
-        var result = await callEngine('analyze_chat', {
+        // 传给 worker 分析（CLI 一次性调用）
+        var result = await run('analyze_chat', {
             chat_text: chat_text,
             endpoint: endpoint,
             api_key: apiKey,
@@ -331,102 +403,27 @@ async function diagEngine(params) {
 }
 exports.diag_engine = diagEngine;
 
-// ===== deploy_*：优先走 worker，worker 未运行时插件侧直连 =====
-async function execTerminal(cmd, timeoutMs) {
-    try {
-        var r = await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs || 15000 });
-        var out = '';
-        if (typeof r === 'string') out = r;
-        else if (r && (r.stdout || r.output)) out = r.stdout || r.output;
-        else if (r && r.body) out = r.body;
-        return String(out || '').trim();
-    } catch (e) {
-        try {
-            var sess = await Tools.System.terminal.create('engine_deploy');
-            await Tools.System.terminal.exec(sess.sessionId, cmd, timeoutMs || 15000);
-            return '';
-        } catch (e2) {
-            return '';
-        }
-    }
+// ===== deploy_*：通过 worker CLI 一次性调用 =====
+function deployStatus(params) {
+  run('deploy_status', params || {}).then(function (result) {
+    complete(result);
+  }).catch(function (e) {
+    complete({ success: false, message: e && e.message ? e.message : String(e) });
+  });
 }
 
-async function deployStatus(params) {
-    // 优先 worker（能拿到完整状态）；worker 未运行则插件侧降级诊断
-    try {
-        var wr = await pingWorker();
-        if (wr) {
-            var result = await callEngine('deploy_status', params || {});
-            complete(result);
-            return;
-        }
-    } catch (e) {}
-    // worker 未运行：插件侧直连检查
-    var status = { worker_running: false, plugin_diag: true };
-    try {
-        var pgs = await execTerminal('pgrep -f worker.py || true', 5000);
-        if (pgs) { status.worker_running = true; status.worker_pid = pgs.split(/\s+/)[0]; }
-    } catch (e) {}
-    try {
-        var tmp = await Tools.Files.read('/tmp/engine_worker.log');
-        if (tmp && (tmp.content || tmp.text)) {
-            status.tmp_log_tail = String(tmp.content || tmp.text).split('\n').slice(-8).join('\n');
-        }
-    } catch (e) {}
-    complete({ success: true, status: status, degraded: true, message: 'Worker 未运行，显示插件侧降级状态' });
+function deployInstall(params) {
+  run('deploy_install', params || {}).then(function (result) {
+    complete(result);
+  }).catch(function (e) {
+    complete({ success: false, message: e && e.message ? e.message : String(e) });
+  });
 }
 
-async function deployInstall(params) {
-    // 优先 worker 内 pip install；worker 未运行则插件侧直连 pip
-    try {
-        var wr = await pingWorker();
-        if (wr) {
-            var result = await callEngine('deploy_install', params || {});
-            complete(result);
-            return;
-        }
-    } catch (e) {}
-    // 插件侧直连：用 venv python -m pip install 缺失依赖
-    var missing = [];
-    for (var mi = 0; mi < ['onnxruntime', 'sqlite-vec', 'tokenizers'].length; mi++) {
-        var mod = ['onnxruntime', 'sqlite-vec', 'tokenizers'][mi];
-        var ck = await execTerminal('/root/.venv/bin/python3 -c "import ' + mod + '" && echo OK || echo MISSING', 8000);
-        if (ck.indexOf('OK') < 0) missing.push(mod);
-    }
-    if (missing.length === 0) {
-        complete({ success: true, installed: [], message: '依赖已齐全' });
-        return;
-    }
-    var pipCmd = '/root/.venv/bin/python3 -m pip install ' + missing.join(' ') + ' 2>&1 | tail -5';
-    var out = await execTerminal(pipCmd, 300000);
-    // 验证是否装成功
-    var installed = [];
-    for (var vi = 0; vi < missing.length; vi++) {
-        var m = missing[vi];
-        var ck2 = await execTerminal('/root/.venv/bin/python3 -c "import ' + m + '" && echo OK || echo MISSING', 8000);
-        if (ck2.indexOf('OK') >= 0) installed.push(m);
-    }
-    complete({ success: true, installed: installed, missing: missing, output: String(out).slice(-300), message: installed.length ? ('已安装: ' + installed.join(', ')) : '安装未完成，请查看输出' });
-}
-
-async function deployRestart(params) {
-    try {
-        var wr = await pingWorker();
-        if (wr) {
-            var result = await callEngine('deploy_restart', params || {});
-            complete(result);
-            return;
-        }
-    } catch (e) {}
-    // 插件侧直连：杀 worker 进程（实际重启由 onAppCreate/ensureWorkerRunning 兜底）
-    var killed = [];
-    try {
-        var pgs = await execTerminal('pgrep -f worker.py || true', 5000);
-        var pids = pgs ? pgs.split(/\s+/).filter(Boolean) : [];
-        for (var ki = 0; ki < pids.length; ki++) {
-            await execTerminal('kill ' + pids[ki] + ' 2>/dev/null || true', 3000);
-            killed.push(pids[ki]);
-        }
-    } catch (e) {}
-    complete({ success: true, killed: killed, restart: '已杀进程，下次插件启动时自动拉起 worker' });
+function deployRestart(params) {
+  run('deploy_restart', params || {}).then(function (result) {
+    complete(result);
+  }).catch(function (e) {
+    complete({ success: false, message: e && e.message ? e.message : String(e) });
+  });
 }
