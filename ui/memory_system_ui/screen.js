@@ -12,6 +12,7 @@ const knowledgeTab = require("./tabs/knowledge");
 const contactsTab = require("./tabs/contacts");
 const messagesTab = require("./tabs/messages"); // 预留：消息Tab
 const characterTab = require("./tabs/character");
+const deployTab = require("./tabs/deploy");
 
 // ===== Tab 注册表 =====
 const TAB_REGISTRY = [
@@ -21,6 +22,7 @@ const TAB_REGISTRY = [
   { id: 3, icon: 'menu_book',     label: '知识' },
   { id: 4, icon: 'person',        label: '角色' },
   { id: 5, icon: 'settings',      label: '设置' },
+  { id: 6, icon: 'build',         label: '部署' },
 ];
 
 function Screen(ctx) {
@@ -44,6 +46,15 @@ function Screen(ctx) {
   } catch(e) { uiBoot = {}; }
 
   var tabState = ctx.useState('tab', (uiBoot.tab !== undefined ? uiBoot.tab : 0));
+  // 首次启动默认打开部署页：无首次运行标记时，初始 tab 指向部署页(6)
+  var firstRunRef = ctx.useRef('firstRun', false);
+  try {
+    if (!ctx.getEnv('MEMORY_ENGINE_FIRST_RUN')) {
+      firstRunRef.current = true;
+      if (uiBoot.tab === undefined) tabState[1](6);
+      try { ctx.setEnv('MEMORY_ENGINE_FIRST_RUN', '1'); } catch(e) {}
+    }
+  } catch(e) {}
   var showSearchState = ctx.useState('showSearch', false);
   var dataState = ctx.useState('allData', cachedData);
   var dataLoadedState = ctx.useState('allDataLoaded', false);
@@ -647,7 +658,7 @@ Operit.NativeInterface.callTool('memory_system', 'save_ui_state', __uiParams);
     UI.Column({ fillMaxWidth: true }, [
       UI.Row({ fillMaxWidth: true, horizontalArrangement: 'spaceBetween', verticalAlignment: 'center' }, [
         UI.Column({}, [
-          UI.Text({ text: '📋 记忆系统', style: 'labelMedium', color: colors.primary }),
+          UI.Text({ text: '📋 记忆引擎', style: 'labelMedium', color: colors.primary }),
           UI.Text({ text: (allData.todos || []).length + ' 待办 · ' + pendingTodoCount + ' 待完成 · ' + (allData.events || []).length + ' 事件', style: 'labelSmall', color: colors.onSurfaceVariant }),
         ]),
         UI.Row({ verticalAlignment: 'center' }, [
@@ -886,6 +897,7 @@ Operit.NativeInterface.callTool('memory_system', 'save_ui_state', __uiParams);
       UI.Spacer({ height: 8 }),
     ].concat(cfgSection);
       break;
+    case 6: tabContent = deployTab.render(ctx); break;
     default: tabContent = overviewTab.render(ctx, allData);
   }
 

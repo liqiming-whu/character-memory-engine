@@ -66,6 +66,12 @@ METADATA
             { "name": "path", "type": "string", "required": true, "description": "备份ZIP路径或目录" },
             { "name": "character_id", "type": "string", "required": false, "description": "导入到指定角色；不传则通用" }
         ]},
+        { "name": "deploy_status", "description": { "zh": "检查部署状态（进程/依赖/模型）", "en": "Check deployment status" }, "parameters": [
+            { "name": "db", "type": "string", "required": false, "description": "数据库路径" },
+            { "name": "port", "type": "integer", "required": false, "description": "端口" }
+        ]},
+        { "name": "deploy_install", "description": { "zh": "安装缺失依赖", "en": "Install missing dependencies" }, "parameters": []},
+        { "name": "deploy_restart", "description": { "zh": "杀掉多余 worker 进程", "en": "Kill duplicate worker processes" }, "parameters": []},
         { "name": "save_relationship", "description": { "zh": "保存关系", "en": "Save relationship" }, "parameters": [
             { "name": "character_id", "type": "string", "required": true, "description": "角色卡ID" },
             { "name": "target", "type": "string", "required": true, "description": "关系对象" },
@@ -76,10 +82,6 @@ METADATA
     ]
 }
 */
-const TOOLS = ["list_memories", "get_memory", "create_memory", "update_memory", "delete_memory",
-               "search_memories", "load_life_data", "upsert_life_item", "delete_life_item",
-               "toggle_todo", "list_characters", "save_character", "get_relationship",
-               "save_relationship", "import_legacy_backup", "ping_worker"];
 
 // Worker HTTP 地址（可经 env 覆盖）
 function workerUrl() {
@@ -112,16 +114,34 @@ async function callEngine(action, params) {
     }
 }
 
-// 动态导出工具（每个 action 一个 exports 函数）
-for (var i = 0; i < TOOLS.length; i++) {
-    (function(action) {
-        exports[action] = async function (params) {
-            try {
-                var result = await callEngine(action, params || {});
-                complete(result);
-            } catch (e) {
-                complete({ success: false, message: e.message || String(e) });
-            }
-        };
-    })(TOOLS[i]);
+// 工具导出：显式 exports（Operit subpackage 解析器识别显式导出名）
+function makeTool(action) {
+    return async function (params) {
+        try {
+            var result = await callEngine(action, params || {});
+            complete(result);
+        } catch (e) {
+            complete({ success: false, message: e.message || String(e) });
+        }
+    };
 }
+
+exports.list_memories = makeTool("list_memories");
+exports.get_memory = makeTool("get_memory");
+exports.create_memory = makeTool("create_memory");
+exports.update_memory = makeTool("update_memory");
+exports.delete_memory = makeTool("delete_memory");
+exports.search_memories = makeTool("search_memories");
+exports.load_life_data = makeTool("load_life_data");
+exports.upsert_life_item = makeTool("upsert_life_item");
+exports.delete_life_item = makeTool("delete_life_item");
+exports.toggle_todo = makeTool("toggle_todo");
+exports.list_characters = makeTool("list_characters");
+exports.save_character = makeTool("save_character");
+exports.get_relationship = makeTool("get_relationship");
+exports.save_relationship = makeTool("save_relationship");
+exports.import_legacy_backup = makeTool("import_legacy_backup");
+exports.deploy_status = makeTool("deploy_status");
+exports.deploy_install = makeTool("deploy_install");
+exports.deploy_restart = makeTool("deploy_restart");
+exports.ping_worker = makeTool("ping_worker");

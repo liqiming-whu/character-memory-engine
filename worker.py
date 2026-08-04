@@ -778,6 +778,99 @@ def ping_worker(conn, params):
     return {"success": True, "pong": True, "version": VERSION, "vec_available": VEC_AVAILABLE, "db": conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]}
 
 
+# ===== 部署状态 / 安装 / 重启 =====
+def _find_worker_processes():
+    """查找本 worker 进程（含重复）。返回 (count, pids)。"""
+    import subprocess
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-f", "worker.py"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+        pids = [p for p in out.split("\n") if p.strip()]
+        return len(pids), pids
+    except Exception:
+        return 0, []
+
+
+def _check_module(mod_name):
+    try:
+        __import__(mod_name)
+        return True
+    except Exception:
+        return False
+
+
+def deploy_status(conn, params):
+    """检查部署状态：进程/重复/依赖/模型/venv/db/端口。"""
+    import importlib.metadata as md
+    status = {}
+    # venv
+    status["venv_ok"] = sys.prefix != sys.base_prefix
+    status["venv_path"] = sys.prefix
+    # 进程
+    count, pids = _find_worker_processes()
+    status["worker_running"] = count > 0
+    status["worker_pid"] = pids[0] if pids else None
+    status["dup_count"] = count - 1 if count > 0 else 0
+    # 依赖
+    status["onnx_ok"] = _check_module("onnxruntime")
+    try:
+        status["onnx_ver"] = md.version("onnxruntime") if status["onnx_ok"] else None
+    except Exception:
+        status["onnx_ver"] = None
+    status["sqlite_vec_ok"] = _check_module("sqlite_vec")
+    status["tokenizers_ok"] = _check_module("tokenizers")
+    # 模型
+    model_path = os.path.join(MODEL_DIR, "model_int8.onnx")
+    status["model_ok"] = os.path.exists(model_path)
+    status["model_path"] = model_path if status["model_ok"] else None
+    # 向量
+    emb = get_embedder()
+    status["vec_available"] = emb is not None
+    # db
+    status["db_ok"] = os.path.exists(params.get("db") or os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db")))
+    status["db_path"] = params.get("db") or os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db"))
+    status["port"] = int(params.get("port") or 8765)
+    return {"success": True, "status": status}
+
+
+def deploy_install(conn, params):
+    """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）。"""
+    import subprocess
+    missing = []
+    if not _check_module("onnxruntime"):
+        missing.append("onnxruntime")
+    if not _check_module("sqlite_vec"):
+        missing.append("sqlite-vec")
+    if not _check_module("tokenizers"):
+        missing.append("tokenizers")
+    if not missing:
+        return {"success": True, "installed": [], "message": "依赖已齐全"}
+    cmd = [sys.executable, "-m", "pip", "install"] + missing
+    try:
+        subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        return {"success": True, "installed": missing, "message": "已安装: " + ", ".join(missing)}
+    except Exception as e:
+        return {"success": False, "message": "安装失败: " + str(e)}
+
+
+def deploy_restart(conn, params):
+    """杀掉旧 worker 进程并重启（仅报告；实际重启由插件侧发起）。"""
+    import subprocess
+    count, pids = _find_worker_processes()
+    killed = []
+    if count > 0:
+        for pid in pids:
+            if str(os.getpid()) == pid:
+                continue  # 不杀自己
+            try:
+                subprocess.run(["kill", pid], timeout=5)
+                killed.append(pid)
+            except Exception:
+                pass
+    return {"success": True, "killed": killed, "restart": "插件侧启动"}
+
+
 def import_legacy_backup(conn, params):
     """从旧版本（v1.5.x）备份导入数据。
 
@@ -893,6 +986,9 @@ ACTIONS = {
     "get_relationship": get_relationship,
     "save_relationship": save_relationship,
     "import_legacy_backup": import_legacy_backup,
+    "deploy_status": deploy_status,
+    "deploy_install": deploy_install,
+    "deploy_restart": deploy_restart,
     "ping_worker": ping_worker,
 }
 
