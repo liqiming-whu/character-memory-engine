@@ -47,15 +47,15 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 
 # 路径：支持环境变量/参数覆盖。
-# 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/character_memory_engine，
-# 用户无需 root 即可访问；models 只读，可留在脚本目录或 /root。
+# 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
+# （Operit 规范：数据在 Operit 根目录下，用户无需 root 即可访问）；models 只读，留在脚本目录或 /root。
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get(
     "MEMORY_ENGINE_DATA_DIR",
-    "/sdcard/Download/character_memory_engine",
+    "/sdcard/Download/Operit/character_memory_engine",
 )
 DB_PATH = os.environ.get("MEMORY_ENGINE_DB", os.path.join(DATA_DIR, "engine.db"))
 MODEL_DIR = os.environ.get("MEMORY_ENGINE_MODEL_DIR", "")
@@ -908,7 +908,7 @@ def log_event(conn, params):
 
 def get_logs(conn, params):
     """读日志文件尾部 N 行，可选按级别过滤，供前端/调试查看。"""
-    n = int(params.get("limit") or 200)
+    n = int(params.get("limit") or 50)
     level = str(params.get("level") or "").upper()
     path = params.get("path") or LOG_PATH
     try:
@@ -1531,6 +1531,14 @@ ACTIONS = {
 def handle_action(db_path, action, params):
     conn = get_conn(db_path)
     try:
+        # 懒建表：确保 memories/characters/relationships 存在，防止 worker 启动时 init_db 未生效
+        try:
+            conn.execute("SELECT COUNT(*) FROM memories").fetchone()
+        except Exception:
+            try:
+                init_db(db_path)
+            except Exception:
+                pass
         fn = ACTIONS.get(action)
         if not fn:
             return {"success": False, "message": "unknown action: " + str(action)}

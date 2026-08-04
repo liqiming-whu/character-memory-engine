@@ -62,20 +62,37 @@ async function execTerminal(cmd, timeoutMs) {
 
 // 把 worker.py / embed.py / models 从包资源部署到固定路径（dual-life-hub 同款模式）
 var _deployed = false;
+// readResource 可能返回空（插件未启用/资源 key 不匹配）；空时回退从 toolpkg_cache 复制已解压文件
+async function deployOneFile(key, fileName, destPath) {
+    var src = '';
+    try { src = ToolPkg.readResource(TOOLPKG_ID, key, fileName, 'false'); } catch (e) {}
+    if (src && String(src).length > 0) {
+        await Tools.Files.copy(String(src), destPath, false, 'android', 'linux');
+        return true;
+    }
+    // 回退：在 toolpkg_cache / Download 里找已解压的源文件
+    jsLog('WARN', 'deployWorkerFiles: readResource 空 (' + key + ')，回退 toolpkg_cache');
+    var found = await execTerminal(
+        "find /data/user/0/com.ai.assistance.operit/files/toolpkg_cache /storage/emulated/0/Android/data/com.ai.assistance.operit/files/toolpkg_cache -name " + fileName + " 2>/dev/null | head -1",
+        8000
+    );
+    var fp = String(found || '').trim();
+    if (fp && fp.indexOf(fileName) >= 0) {
+        // 用 terminal cp（同为 linux 域，避免 android 域路径问题）
+        await execTerminal("cp " + fp + " " + destPath + " 2>/dev/null || true", 8000);
+        return true;
+    }
+    jsLog('ERROR', 'deployWorkerFiles: 无法获取 ' + fileName);
+    return false;
+}
+
 async function deployWorkerFiles() {
     if (_deployed) return true;
     try {
         await execTerminal('mkdir -p ' + WORKER_DIR + '/models', 8000);
-        // readResource 返回复制到缓存后的绝对路径，再 copy 到固定目录
-        var workerSrc = ToolPkg.readResource(TOOLPKG_ID, 'engine_worker_py', 'worker.py', 'false');
-        if (workerSrc) {
-            await Tools.Files.copy(String(workerSrc), WORKER_PATH, false, 'android', 'linux');
-        }
-        var embedSrc = ToolPkg.readResource(TOOLPKG_ID, 'engine_embed_py', 'embed.py', 'false');
-        if (embedSrc) {
-            await Tools.Files.copy(String(embedSrc), EMBED_PATH, false, 'android', 'linux');
-        }
-        // 模型资源：config.json / model_int8.onnx / tokenizer.json → models/
+        var ok1 = await deployOneFile('engine_worker_py', 'worker.py', WORKER_PATH);
+        var ok2 = await deployOneFile('engine_embed_py', 'embed.py', EMBED_PATH);
+        // 模型资源（大文件，readResource 失败时同样回退 toolpkg_cache）
         var modelFiles = [
             ['engine_model_config', 'config.json'],
             ['engine_model_onnx', 'model_int8.onnx'],
@@ -83,10 +100,7 @@ async function deployWorkerFiles() {
         ];
         for (var mi = 0; mi < modelFiles.length; mi++) {
             try {
-                var mSrc = ToolPkg.readResource(TOOLPKG_ID, modelFiles[mi][0], modelFiles[mi][1], 'false');
-                if (mSrc) {
-                    await Tools.Files.copy(String(mSrc), WORKER_DIR + '/models/' + modelFiles[mi][1], false, 'android', 'linux');
-                }
+                await deployOneFile(modelFiles[mi][0], modelFiles[mi][1], WORKER_DIR + '/models/' + modelFiles[mi][1]);
             } catch (e) {
                 jsLog('WARN', 'deployWorkerFiles: 模型 ' + modelFiles[mi][1] + ' 部署失败: ' + (e.message || String(e)));
             }

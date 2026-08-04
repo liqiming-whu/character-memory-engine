@@ -318,7 +318,7 @@ async function diagEngine(params) {
 
         // 3) 读 engine.log（worker 自身日志，若有）
         try {
-            var el = await Tools.Files.read('/sdcard/Download/character_memory_engine/logs/engine.log');
+            var el = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/logs/engine.log');
             var etxt = el && (el.content || el.text || '') || '';
             out.engine_log_tail = String(etxt).split('\n').slice(-15).join('\n');
         } catch (e) { /* engine.log 可能尚未生成 */ }
