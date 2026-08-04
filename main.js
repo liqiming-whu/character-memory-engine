@@ -10,14 +10,11 @@ exports.onPromptFinalize = onPromptFinalize;
 var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 
 // ===== Worker 部署与启动 =====
-// 参考 dual-life-hub：用 ToolPkg.readResource 把 worker.py 从包资源复制到固定路径，
-// 不依赖 toolpkg_cache 解压位置（该位置在 Operit 升级/清理时会变）。
-var TOOLPKG_ID = 'com.operit.character_memory_engine';
-var WORKER_DIR = '/root/character_memory_engine'; // 与 venv 同目录，root 下可写
-var WORKER_PATH = WORKER_DIR + '/worker.py';
-var EMBED_PATH = WORKER_DIR + '/embed.py';
+// 定位 toolpkg_cache / Download 中的 worker.py 并就地启动。
+// worker.py 用 _SCRIPT_DIR 自动探测同目录 models；数据按 DATA_DIR 规范落到
+// /sdcard/Download/Operit/character_memory_engine。
 var WORKER_PORT = 8765;
-var TRIGGER_FILE = WORKER_DIR + '/trigger.json';
+var TRIGGER_FILE = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
@@ -60,59 +57,29 @@ async function execTerminal(cmd, timeoutMs) {
     }
 }
 
-// 把 worker.py / embed.py / models 从包资源部署到固定路径（dual-life-hub 同款模式）
-var _deployed = false;
-// readResource 可能返回空（插件未启用/资源 key 不匹配）；空时回退从 toolpkg_cache 复制已解压文件
-async function deployOneFile(key, fileName, destPath) {
-    var src = '';
-    try { src = ToolPkg.readResource(TOOLPKG_ID, key, fileName, 'false'); } catch (e) {}
-    if (src && String(src).length > 0) {
-        await Tools.Files.copy(String(src), destPath, false, 'android', 'linux');
-        return true;
-    }
-    // 回退：在 toolpkg_cache / Download 里找已解压的源文件
-    jsLog('WARN', 'deployWorkerFiles: readResource 空 (' + key + ')，回退 toolpkg_cache');
-    var found = await execTerminal(
-        "find /data/user/0/com.ai.assistance.operit/files/toolpkg_cache /storage/emulated/0/Android/data/com.ai.assistance.operit/files/toolpkg_cache -name " + fileName + " 2>/dev/null | head -1",
-        8000
-    );
-    var fp = String(found || '').trim();
-    if (fp && fp.indexOf(fileName) >= 0) {
-        // 用 terminal cp（同为 linux 域，避免 android 域路径问题）
-        await execTerminal("cp " + fp + " " + destPath + " 2>/dev/null || true", 8000);
-        return true;
-    }
-    jsLog('ERROR', 'deployWorkerFiles: 无法获取 ' + fileName);
-    return false;
-}
+// 定位 worker.py：优先 toolpkg_cache（Operit 解压位置，日志证实 worker 一直从这跑），
+// 再找 Download 手动部署。worker.py 用 _SCRIPT_DIR 自动探测同目录 models，
+// 数据按 DATA_DIR 规范落到 /sdcard/Download/Operit/character_memory_engine。
+var WORKER_PY_CANDIDATES = [
+    '/data/user/0/com.ai.assistance.operit/files/toolpkg_cache',
+    '/storage/emulated/0/Android/data/com.ai.assistance.operit/files/toolpkg_cache',
+    '/root/character_memory_engine',
+    '/sdcard/Download/Operit/character_memory_engine',
+    '/sdcard/Download/character_memory_engine'
+];
 
-async function deployWorkerFiles() {
-    if (_deployed) return true;
-    try {
-        await execTerminal('mkdir -p ' + WORKER_DIR + '/models', 8000);
-        var ok1 = await deployOneFile('engine_worker_py', 'worker.py', WORKER_PATH);
-        var ok2 = await deployOneFile('engine_embed_py', 'embed.py', EMBED_PATH);
-        // 模型资源（大文件，readResource 失败时同样回退 toolpkg_cache）
-        var modelFiles = [
-            ['engine_model_config', 'config.json'],
-            ['engine_model_onnx', 'model_int8.onnx'],
-            ['engine_model_tokenizer', 'tokenizer.json']
-        ];
-        for (var mi = 0; mi < modelFiles.length; mi++) {
-            try {
-                await deployOneFile(modelFiles[mi][0], modelFiles[mi][1], WORKER_DIR + '/models/' + modelFiles[mi][1]);
-            } catch (e) {
-                jsLog('WARN', 'deployWorkerFiles: 模型 ' + modelFiles[mi][1] + ' 部署失败: ' + (e.message || String(e)));
-            }
-        }
-        var ok = await execTerminal('test -f ' + WORKER_PATH + ' && echo OK', 5000);
-        _deployed = String(ok).indexOf('OK') >= 0;
-        if (!_deployed) jsLog('ERROR', 'deployWorkerFiles: worker.py 复制到 ' + WORKER_PATH + ' 失败');
-        return _deployed;
-    } catch (e) {
-        jsLog('ERROR', 'deployWorkerFiles: ' + (e.message || String(e)));
-        return false;
+async function locateWorkerPy() {
+    for (var di = 0; di < WORKER_PY_CANDIDATES.length; di++) {
+        try {
+            var out = await execTerminal(
+                "find " + WORKER_PY_CANDIDATES[di] + " -maxdepth 2 -name worker.py 2>/dev/null | head -1",
+                8000
+            );
+            var p = String(out || '').trim();
+            if (p && p.indexOf('worker.py') >= 0) return p;
+        } catch (e) {}
     }
+    return '';
 }
 
 // ensureWorkerRunning 单例：并发调用共享同一次启动，避免重复拉起 worker
@@ -133,12 +100,14 @@ async function doEnsureWorkerRunning() {
         if (ok) return true;
         jsLog('DEBUG', 'ensureWorkerRunning: worker 未运行，准备启动');
 
-        // 2) 部署 worker.py / embed.py 到固定路径
-        var deployed = await deployWorkerFiles();
-        if (!deployed) {
-            jsLog('ERROR', 'ensureWorkerRunning: worker.py 部署失败，无法启动');
+        // 2) 定位 worker.py（toolpkg_cache 优先，其次 Download / root）
+        var workerPy = await locateWorkerPy();
+        if (!workerPy) {
+            jsLog('ERROR', 'ensureWorkerRunning: 未找到 worker.py');
             return false;
         }
+        var workerDir = workerPy.substring(0, workerPy.lastIndexOf('/'));
+        jsLog('INFO', 'ensureWorkerRunning: 定位 worker.py -> ' + workerPy);
 
         // 3) 选择 python：优先 /root/.venv（真机已验证），否则系统 python3
         var pyCmd = '';
@@ -150,8 +119,8 @@ async function doEnsureWorkerRunning() {
         } catch (e) {}
         if (!pyCmd) pyCmd = 'python3';
 
-        // 4) 启动 worker（后台，日志重定向到 /tmp/engine_worker.log）
-        var cmd = 'cd ' + WORKER_DIR + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
+        // 4) 启动 worker（后台，在 worker 所在目录运行，日志重定向到 /tmp/engine_worker.log）
+        var cmd = 'cd ' + workerDir + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
         jsLog('INFO', 'ensureWorkerRunning: 启动 worker -> ' + cmd);
         try {
             await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: 15000 });
