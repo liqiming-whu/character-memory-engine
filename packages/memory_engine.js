@@ -72,6 +72,9 @@ METADATA
         ]},
         { "name": "deploy_install", "description": { "zh": "安装缺失依赖", "en": "Install missing dependencies" }, "parameters": []},
         { "name": "deploy_restart", "description": { "zh": "杀掉多余 worker 进程", "en": "Kill duplicate worker processes" }, "parameters": []},
+        { "name": "save_ui_state", "description": { "zh": "保存界面状态", "en": "Save UI state" }, "parameters": [
+            { "name": "state_json", "type": "string", "required": true, "description": "界面状态JSON" }
+        ]},
         { "name": "save_relationship", "description": { "zh": "保存关系", "en": "Save relationship" }, "parameters": [
             { "name": "character_id", "type": "string", "required": true, "description": "角色卡ID" },
             { "name": "target", "type": "string", "required": true, "description": "关系对象" },
@@ -144,4 +147,5 @@ exports.import_legacy_backup = makeTool("import_legacy_backup");
 exports.deploy_status = makeTool("deploy_status");
 exports.deploy_install = makeTool("deploy_install");
 exports.deploy_restart = makeTool("deploy_restart");
+exports.save_ui_state = makeTool("save_ui_state");
 exports.ping_worker = makeTool("ping_worker");

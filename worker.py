@@ -871,6 +871,24 @@ def deploy_restart(conn, params):
     return {"success": True, "killed": killed, "restart": "插件侧启动"}
 
 
+def save_ui_state(conn, params):
+    """保存 UI 状态（last_ui_state.json）。"""
+    state = params.get("state_json") or params.get("state")
+    if not state:
+        return {"success": False, "message": "missing state_json"}
+    try:
+        parsed = json.loads(state) if isinstance(state, str) else state
+    except Exception:
+        parsed = state
+    try:
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "data": parsed}, f, ensure_ascii=False)
+        return {"success": True, "path": path}
+    except Exception as e:
+        return {"success": False, "message": "save failed: " + str(e)}
+
+
 def import_legacy_backup(conn, params):
     """从旧版本（v1.5.x）备份导入数据。
 
@@ -989,6 +1007,7 @@ ACTIONS = {
     "deploy_status": deploy_status,
     "deploy_install": deploy_install,
     "deploy_restart": deploy_restart,
+    "save_ui_state": save_ui_state,
     "ping_worker": ping_worker,
 }
 

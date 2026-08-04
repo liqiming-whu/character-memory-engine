@@ -28,7 +28,7 @@ function render(ctx, allData, states, actions) {
   // 切换待办
   async function toggleTodoItem(idx) {
     try {
-      var raw = await ctx.callTool('memory_system:toggle_todo', { todo_index: idx });
+      var raw = await ctx.callTool('memory_engine:toggle_todo', { index: idx });
       if (parseResult(raw) && parseResult(raw).success) {
         await actions.loadData();
       }
@@ -38,7 +38,7 @@ function render(ctx, allData, states, actions) {
   // 删除
   async function deleteItem(category, index) {
     try {
-      var raw = await ctx.callTool('memory_system:sync_to_env', { action: 'delete', category: category, index: String(index) });
+      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, index: index });
       if (parseResult(raw) && parseResult(raw).success) {
         await actions.loadData();
         actions.setResult('✅ 已删除');

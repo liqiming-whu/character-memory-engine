@@ -41,7 +41,7 @@ function Screen(ctx) {
   // 渲染上下文里 ctx.getEnv 是同步的，无需 await
   var uiBoot = {};
   try {
-    var _uiRaw = ctx.getEnv('MEMORY_SYSTEM_UI_STATE');
+    var _uiRaw = ctx.getEnv('MEMORY_ENGINE_UI_STATE');
     if (_uiRaw) uiBoot = JSON.parse(_uiRaw) || {};
   } catch(e) { uiBoot = {}; }
 
@@ -315,20 +315,21 @@ loadingChatsState[1](false);
     // 每次进入都重新加载角色上下文与记忆；不因之前加载过而跳过，
     // 避免快速切换实例复用时持久 ref/state 残留导致角色页显示异常。
     try {
-      var pRaw = await ctx.callTool('memory_system:get_persona_context', {});
+      var pRaw = await ctx.callTool('memory_engine:list_characters', {});
       var pResult = parseResult(pRaw);
-      var p = (pResult && pResult.success && pResult.persona) ? pResult.persona : { id: '', name: '', type: '' };
-      ctx.setEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_ID', String(p.id || ''));
-      ctx.setEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_NAME', String(p.name || ''));
-      ctx.setEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_TYPE', String(p.type || ''));
+      var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
+      var p = chars.length > 0
+        ? { id: String(chars[0].id || ''), name: String(chars[0].name || ''), type: 'character_card' }
+        : { id: '', name: '', type: '' };
+      ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(p.id || ''));
+      ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(p.name || ''));
       screenPersonaState[1]({ id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') });
       if (p.id) {
         try {
-          var mRaw = await ctx.callTool('memory_system:load_memories', {
-            query: '*',
-            limit: 100,
-            scope: 'persona',
-            caller_card_id: String(p.id)
+          var mRaw = await ctx.callTool('memory_engine:list_memories', {
+            category: 'character',
+            character_id: String(p.id),
+            limit: 100
           });
           var mResult = parseResult(mRaw);
           if (mResult && mResult.success && mResult.memories) {
@@ -342,13 +343,13 @@ loadingChatsState[1](false);
   async function loadKnowledgeMemories() {
     memoryLoadingState[1](true);
     try {
-      var personaRaw = await ctx.callTool('memory_system:get_persona_context', {});
+      var personaRaw = await ctx.callTool('memory_engine:list_characters', {});
       var personaResult = parseResult(personaRaw);
-      var personaId = personaResult && personaResult.success && personaResult.persona ? String(personaResult.persona.id || '') : '';
-      var raw = await ctx.callTool('memory_system:load_memories', {
+      var personaId = personaResult && personaResult.success && personaResult.characters && personaResult.characters.length > 0
+        ? String(personaResult.characters[0].id || '') : '';
+      var raw = await ctx.callTool('memory_engine:list_memories', {
         limit: 100,
-        scope: personaId ? 'all' : 'global',
-        caller_card_id: personaId || undefined
+        character_id: personaId || undefined
       });
       var result = parseResult(raw);
       if (result && result.success) memoryState[1](result.memories || []);
@@ -516,7 +517,7 @@ loadingChatsState[1](false);
 
   async function deleteItem(category, index) {
     try {
-      var raw = await ctx.callTool('memory_system:sync_to_env', { action: 'delete', category: category, index: String(index) });
+      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, index: index });
       if (parseResult(raw) && parseResult(raw).success) {
         await loadData();
         resultState[1]('✅ 已删除');
@@ -567,14 +568,14 @@ if (uiSaveRef.current !== __uiSnapshot) {
 uiSaveRef.current = __uiSnapshot;
 // 主路径：ctx.setEnv 同步写入；下次进入 getEnv 同步读取，无需异步等待
 // 这是 msg_watcher 的 CACHED_ALL_DATA 同款模式
-try { ctx.setEnv('MEMORY_SYSTEM_UI_STATE', __uiSnapshot); } catch(__eSet) {}
+try { ctx.setEnv('MEMORY_ENGINE_UI_STATE', __uiSnapshot); } catch(__eSet) {}
 // 兜底：异步触发工具保存到磁盘，保证重启后也能恢复
 try {
 var __uiParams = JSON.stringify({ state_json: __uiSnapshot });
 if (typeof NativeInterface !== 'undefined' && typeof NativeInterface.callTool === 'function') {
-NativeInterface.callTool('memory_system', 'save_ui_state', __uiParams);
+NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
 } else if (typeof Operit !== 'undefined' && Operit.NativeInterface && typeof Operit.NativeInterface.callTool === 'function') {
-Operit.NativeInterface.callTool('memory_system', 'save_ui_state', __uiParams);
+Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
 }
 } catch(__eSave) {}
 }
