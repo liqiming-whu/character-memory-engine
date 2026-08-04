@@ -10,9 +10,7 @@ exports.onPromptFinalize = onPromptFinalize;
 var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 
 // ===== Worker 部署与启动 =====
-// 复用真机已验证的部署：代码在 /sdcard/Download/character_memory_engine，
-// venv 在 /root/.venv，模型在 models/。
-var ENGINE_DIR = '/sdcard/Download/character_memory_engine';
+// worker.py 真实位置由 Operit 解压到 toolpkg_cache（或手动部署到 Download），动态探测。
 var WORKER_PORT = 8765;
 var TRIGGER_FILE = '/sdcard/Download/character_memory_engine/trigger.json';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
@@ -40,6 +38,41 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
+// 探测 worker.py 真实路径：先找 toolpkg_cache（Operit 解压位置），再找 Download（手动部署）
+async function findWorkerPy() {
+    var dirs = [
+        "/storage/emulated/0/Android/data/com.ai.assistance.operit/files/toolpkg_cache",
+        "/data/data/com.ai.assistance.operit/files/toolpkg_cache",
+        "/sdcard/Download/character_memory_engine",
+        "/storage/emulated/0/Download/character_memory_engine"
+    ];
+    for (var di = 0; di < dirs.length; di++) {
+        try {
+            var out = await execTerminal("find " + dirs[di] + " -maxdepth 2 -name worker.py 2>/dev/null | head -1", 8000);
+            var p = String(out || '').trim();
+            if (p && p.indexOf('worker.py') >= 0) return p;
+        } catch (e) {}
+    }
+    return '';
+}
+
+async function execTerminal(cmd, timeoutMs) {
+    try {
+        var r = await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs || 15000 });
+        var s = '';
+        if (typeof r === 'string') s = r;
+        else if (r && (r.stdout || r.output)) s = r.stdout || r.output;
+        else if (r && r.body) s = r.body;
+        return String(s || '');
+    } catch (e) {
+        try {
+            var sess = await Tools.System.terminal.create('engine_start');
+            await Tools.System.terminal.exec(sess.sessionId, cmd, timeoutMs || 15000);
+        } catch (e2) {}
+        return '';
+    }
+}
+
 // ensureWorkerRunning 单例：并发调用共享同一次启动，避免重复拉起 worker
 var _ensureRunningPromise = null;
 function ensureWorkerRunning() {
@@ -58,8 +91,27 @@ async function doEnsureWorkerRunning() {
         if (ok) return true;
         jsLog('DEBUG', 'ensureWorkerRunning: worker 未运行，准备启动');
 
-        // 2) 启动 worker（后台，用 venv python）
-        var cmd = 'cd ' + ENGINE_DIR + ' && nohup /root/.venv/bin/python3 worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
+        // 2) 探测 worker.py 真实路径
+        var workerPy = await findWorkerPy();
+        if (!workerPy) {
+            jsLog('ERROR', 'ensureWorkerRunning: 未找到 worker.py（已探测 toolpkg_cache + Download）');
+            return false;
+        }
+        var workerDir = workerPy.substring(0, workerPy.lastIndexOf('/'));
+
+        // 3) 选择 python：优先 /root/.venv（真机已验证），否则系统 python3
+        var pyCmd = '';
+        try {
+            var venvOk = await execTerminal("test -x /root/.venv/bin/python3 && echo OK", 5000);
+            if (String(venvOk).indexOf('OK') >= 0) {
+                pyCmd = '/root/.venv/bin/python3';
+            }
+        } catch (e) {}
+        if (!pyCmd) pyCmd = 'python3';
+
+        // 4) 启动 worker（后台，日志重定向到 /tmp/engine_worker.log）
+        var cmd = 'cd ' + workerDir + ' && nohup ' + pyCmd + ' worker.py --port ' + WORKER_PORT + ' > /tmp/engine_worker.log 2>&1 &';
+        jsLog('INFO', 'ensureWorkerRunning: 启动 worker -> ' + cmd);
         try {
             await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: 15000 });
         } catch (e) {
@@ -72,12 +124,12 @@ async function doEnsureWorkerRunning() {
             }
         }
 
-        // 3) 等待 worker 就绪
-        for (var i = 0; i < 10; i++) {
+        // 5) 等待 worker 就绪
+        for (var i = 0; i < 12; i++) {
             await new Promise(function(res) { setTimeout(res, 1000); });
             if (await pingWorker()) return true;
         }
-        jsLog('ERROR', 'ensureWorkerRunning: 10 秒内 ping 不通 worker');
+        jsLog('ERROR', 'ensureWorkerRunning: 12 秒内 ping 不通 worker');
         return false;
     } catch (e) {
         jsLog('ERROR', 'ensureWorkerRunning: ' + (e.message || String(e)));

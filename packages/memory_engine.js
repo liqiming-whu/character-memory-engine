@@ -101,7 +101,8 @@ METADATA
             { "name": "limit", "type": "integer", "required": false, "description": "返回行数，默认 200" },
             { "name": "level", "type": "string", "required": false, "description": "级别过滤：ERROR/WARN/INFO/DEBUG" },
             { "name": "path", "type": "string", "required": false, "description": "日志文件路径（默认 engine.log）" }
-        ]}
+        ]},
+        { "name": "diag_engine", "description": { "zh": "插件侧诊断（不经 worker）：进程/启动日志/engine.log", "en": "Diagnose engine without worker" }, "parameters": []}
     ]
 }
 */
@@ -202,9 +203,10 @@ exports.save_character = makeTool("save_character");
 exports.get_relationship = makeTool("get_relationship");
 exports.save_relationship = makeTool("save_relationship");
 exports.import_legacy_backup = makeTool("import_legacy_backup");
-exports.deploy_status = makeTool("deploy_status");
-exports.deploy_install = makeTool("deploy_install");
-exports.deploy_restart = makeTool("deploy_restart");
+// deploy_* 用自定义实现：优先走 worker，worker 未运行时插件侧直连 terminal
+exports.deploy_status = deployStatus;
+exports.deploy_install = deployInstall;
+exports.deploy_restart = deployRestart;
 exports.save_ui_state = makeTool("save_ui_state");
 exports.trigger_analysis = makeTool("trigger_analysis");
 exports.set_injection_settings = makeTool("set_injection_settings");
@@ -289,3 +291,142 @@ async function analyzeChat(params) {
     }
 }
 exports.analyze_chat = analyzeChat;
+
+// ===== diag_engine：插件侧诊断（不经 worker，worker 未运行时也能用）=====
+// 解决死锁：worker 起不来时部署页无法通过 worker 查状态/看日志。
+// 这里直接用 Tools.System.terminal + Tools.Files 读启动日志/进程/engine.log。
+async function diagEngine(params) {
+    try {
+        var out = { worker_up: false, tmp_log_tail: '', engine_log_tail: '', process_count: 0, pids: [], messages: [] };
+
+        // 1) 检查 worker 进程（pgrep）
+        try {
+            var pg = await Tools.System.terminal.hiddenExec("pgrep -f worker.py || true", { timeoutMs: 5000 });
+            var pgs = String(pg && (pg.stdout || pg.output || pg) || '').trim();
+            if (pgs) {
+                out.process_count = pgs.split(/\s+/).filter(Boolean).length;
+                out.pids = pgs.split(/\s+/).filter(Boolean);
+            }
+        } catch (e) { out.messages.push('pgrep 失败: ' + (e.message || String(e))); }
+
+        // 2) 读 worker 启动日志（/tmp/engine_worker.log 尾部）
+        try {
+            var tr = await Tools.Files.read('/tmp/engine_worker.log');
+            var txt = tr && (tr.content || tr.text || '') || '';
+            out.tmp_log_tail = String(txt).split('\n').slice(-15).join('\n');
+        } catch (e) { out.messages.push('读 /tmp/engine_worker.log 失败: ' + (e.message || String(e))); }
+
+        // 3) 读 engine.log（worker 自身日志，若有）
+        try {
+            var el = await Tools.Files.read('/sdcard/Download/character_memory_engine/logs/engine.log');
+            var etxt = el && (el.content || el.text || '') || '';
+            out.engine_log_tail = String(etxt).split('\n').slice(-15).join('\n');
+        } catch (e) { /* engine.log 可能尚未生成 */ }
+
+        out.worker_up = out.process_count > 0;
+        complete({ success: true, diag: out });
+    } catch (e) {
+        complete({ success: false, message: '诊断异常: ' + (e.message || String(e)) });
+    }
+}
+exports.diag_engine = diagEngine;
+
+// ===== deploy_*：优先走 worker，worker 未运行时插件侧直连 =====
+async function execTerminal(cmd, timeoutMs) {
+    try {
+        var r = await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs || 15000 });
+        var out = '';
+        if (typeof r === 'string') out = r;
+        else if (r && (r.stdout || r.output)) out = r.stdout || r.output;
+        else if (r && r.body) out = r.body;
+        return String(out || '').trim();
+    } catch (e) {
+        try {
+            var sess = await Tools.System.terminal.create('engine_deploy');
+            await Tools.System.terminal.exec(sess.sessionId, cmd, timeoutMs || 15000);
+            return '';
+        } catch (e2) {
+            return '';
+        }
+    }
+}
+
+async function deployStatus(params) {
+    // 优先 worker（能拿到完整状态）；worker 未运行则插件侧降级诊断
+    try {
+        var wr = await pingWorker();
+        if (wr) {
+            var result = await callEngine('deploy_status', params || {});
+            complete(result);
+            return;
+        }
+    } catch (e) {}
+    // worker 未运行：插件侧直连检查
+    var status = { worker_running: false, plugin_diag: true };
+    try {
+        var pgs = await execTerminal('pgrep -f worker.py || true', 5000);
+        if (pgs) { status.worker_running = true; status.worker_pid = pgs.split(/\s+/)[0]; }
+    } catch (e) {}
+    try {
+        var tmp = await Tools.Files.read('/tmp/engine_worker.log');
+        if (tmp && (tmp.content || tmp.text)) {
+            status.tmp_log_tail = String(tmp.content || tmp.text).split('\n').slice(-8).join('\n');
+        }
+    } catch (e) {}
+    complete({ success: true, status: status, degraded: true, message: 'Worker 未运行，显示插件侧降级状态' });
+}
+
+async function deployInstall(params) {
+    // 优先 worker 内 pip install；worker 未运行则插件侧直连 pip
+    try {
+        var wr = await pingWorker();
+        if (wr) {
+            var result = await callEngine('deploy_install', params || {});
+            complete(result);
+            return;
+        }
+    } catch (e) {}
+    // 插件侧直连：用 venv python -m pip install 缺失依赖
+    var missing = [];
+    for (var mi = 0; mi < ['onnxruntime', 'sqlite-vec', 'tokenizers'].length; mi++) {
+        var mod = ['onnxruntime', 'sqlite-vec', 'tokenizers'][mi];
+        var ck = await execTerminal('/root/.venv/bin/python3 -c "import ' + mod + '" && echo OK || echo MISSING', 8000);
+        if (ck.indexOf('OK') < 0) missing.push(mod);
+    }
+    if (missing.length === 0) {
+        complete({ success: true, installed: [], message: '依赖已齐全' });
+        return;
+    }
+    var pipCmd = '/root/.venv/bin/python3 -m pip install ' + missing.join(' ') + ' 2>&1 | tail -5';
+    var out = await execTerminal(pipCmd, 300000);
+    // 验证是否装成功
+    var installed = [];
+    for (var vi = 0; vi < missing.length; vi++) {
+        var m = missing[vi];
+        var ck2 = await execTerminal('/root/.venv/bin/python3 -c "import ' + m + '" && echo OK || echo MISSING', 8000);
+        if (ck2.indexOf('OK') >= 0) installed.push(m);
+    }
+    complete({ success: true, installed: installed, missing: missing, output: String(out).slice(-300), message: installed.length ? ('已安装: ' + installed.join(', ')) : '安装未完成，请查看输出' });
+}
+
+async function deployRestart(params) {
+    try {
+        var wr = await pingWorker();
+        if (wr) {
+            var result = await callEngine('deploy_restart', params || {});
+            complete(result);
+            return;
+        }
+    } catch (e) {}
+    // 插件侧直连：杀 worker 进程（实际重启由 onAppCreate/ensureWorkerRunning 兜底）
+    var killed = [];
+    try {
+        var pgs = await execTerminal('pgrep -f worker.py || true', 5000);
+        var pids = pgs ? pgs.split(/\s+/).filter(Boolean) : [];
+        for (var ki = 0; ki < pids.length; ki++) {
+            await execTerminal('kill ' + pids[ki] + ' 2>/dev/null || true', 3000);
+            killed.push(pids[ki]);
+        }
+    } catch (e) {}
+    complete({ success: true, killed: killed, restart: '已杀进程，下次插件启动时自动拉起 worker' });
+}

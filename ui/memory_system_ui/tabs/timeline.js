@@ -64,7 +64,7 @@ function render(ctx, allData, states, actions) {
   for (var tei = 0; tei < filteredEvents.length; tei++) {
     (function(e, idx) {
       timelineItems.push({
-        sortDate: e.date || (e.timestamp ? e.timestamp.substring(0,10) : ''),
+        sortDate: e.date || (e.timestamp ? String(e.timestamp).substring(0,10) : ''),
         render: UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: getTypeColor(e.type), alpha: 0.08, padding: 8 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
             UI.Icon({ name: getTypeIcon(e.type), tint: getTypeColor(e.type), size: 16 }),
@@ -88,7 +88,7 @@ function render(ctx, allData, states, actions) {
       var amtColor = isIncome ? colors.primary : colors.error;
       var amt = parseFloat(f.amount) || 0;
       timelineItems.push({
-        sortDate: f.date || (f.timestamp ? f.timestamp.substring(0,10) : ''),
+        sortDate: f.date || (f.timestamp ? String(f.timestamp).substring(0,10) : ''),
         render: UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: amtColor, alpha: 0.08, padding: 8 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
             UI.Icon({ name: isIncome ? 'add_circle' : 'remove_circle', tint: amtColor, size: 16 }),

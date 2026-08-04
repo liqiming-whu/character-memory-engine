@@ -16,6 +16,7 @@ function render(ctx) {
   var logState = ctx.useState('deploy_log', null);
   var logLoadingState = ctx.useState('deploy_log_loading', false);
   var logFilterState = ctx.useState('deploy_log_filter', '');
+  var diagState = ctx.useState('deploy_diag', null);
 
   async function checkStatus() {
     busyState[1](true);
@@ -33,6 +34,22 @@ function render(ctx) {
       msgState[1]('状态检查异常：' + (e.message || String(e)));
     }
     busyState[1](false);
+  }
+
+  // 插件侧诊断：不经 worker，worker 未运行时也能看进程/启动日志/engine.log
+  async function runDiagnosis() {
+    diagState[1]({ running: true });
+    try {
+      var raw = await ctx.callTool('memory_engine:diag_engine', {});
+      var r = parseResult(raw);
+      if (r && r.success) {
+        diagState[1](r.diag || {});
+      } else {
+        diagState[1]({ error: ((r && r.message) || '诊断失败') });
+      }
+    } catch (e) {
+      diagState[1]({ error: '诊断异常：' + (e.message || String(e)) });
+    }
   }
 
   async function loadLogs() {
@@ -124,8 +141,34 @@ function render(ctx) {
         UI.Text({ text: logLoadingState[0] ? '加载中...' : '查看日志', style: 'labelSmall', color: colors.secondary, fontWeight: 'bold' }),
       ]),
     ]),
+    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.errorContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: runDiagnosis }, [
+      UI.Row({ verticalAlignment: 'center' }, [
+        UI.Icon({ name: 'bug_report', tint: colors.error, size: 16 }),
+        UI.Spacer({ width: 4 }),
+        UI.Text({ text: '诊断', style: 'labelSmall', color: colors.error, fontWeight: 'bold' }),
+      ]),
+    ]),
   ]));
   items.push(UI.Spacer({ height: 8 }));
+
+  // 插件侧诊断展示（worker 未运行时也有用）
+  var dg = diagState[0];
+  if (dg) {
+    items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 10 }, containerColor: colors.surfaceContainerHigh, padding: 12 }, [
+      UI.Column({ spacing: 4 }, [
+        UI.Text({ text: dg.running ? '诊断中...' : '插件侧诊断（不经 Worker）', style: 'labelMedium', fontWeight: 'bold', color: colors.primary }),
+        dg.error
+          ? UI.Text({ text: dg.error, style: 'labelSmall', color: colors.error })
+          : [
+              UI.Text({ text: 'Worker 进程: ' + (dg.worker_up ? '运行中 (' + (dg.process_count || 0) + ' 个)' : '未运行'), style: 'labelSmall', color: dg.worker_up ? '#4CAF50' : colors.error }),
+              dg.pids && dg.pids.length ? UI.Text({ text: 'PID: ' + dg.pids.join(', '), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
+              dg.tmp_log_tail ? UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + dg.tmp_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
+              dg.engine_log_tail ? UI.Text({ text: 'engine.log 尾部:\n' + dg.engine_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
+            ],
+      ]),
+    ]));
+    items.push(UI.Spacer({ height: 8 }));
+  }
 
   // 日志展示
   var lg = logState[0];

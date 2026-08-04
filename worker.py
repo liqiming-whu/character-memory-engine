@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 # 路径：支持环境变量/参数覆盖，默认探测（先脚本同目录，再真机固定路径）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
