@@ -114,9 +114,9 @@ function workerUrl() {
 }
 
 // 写日志：经 worker log_event 落到 engine.log（fire-and-forget，失败不影响业务）
-async function logLocal(level, msg) {
+function logLocal(level, msg) {
     try {
-        await Tools.Net.http({
+        Tools.Net.http({
             url: workerUrl(),
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -124,7 +124,7 @@ async function logLocal(level, msg) {
             connect_timeout: 2000,
             read_timeout: 2000,
             ignore_ssl: true
-        });
+        }).catch(function() {});
     } catch (e) {}
 }
 
@@ -151,6 +151,25 @@ async function callEngine(action, params) {
         }
         return JSON.parse(body);
     } catch (e) {
+        // worker 可能刚启动尚未就绪：等 1.5s 重试一次（应用冷启动首批调用常见）
+        logLocal('DEBUG', 'callEngine ' + action + ' 首次失败，1.5s 后重试: ' + (e.message || String(e)));
+        await new Promise(function (res) { setTimeout(res, 1500); });
+        try {
+            var retry = await Tools.Net.http({
+                url: url,
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ action: action, params: params || {} }),
+                connect_timeout: 5000,
+                read_timeout: 60000,
+                ignore_ssl: true
+            });
+            var rbody = '';
+            if (typeof retry === 'string') rbody = retry;
+            else if (retry && retry.body) rbody = typeof retry.body === 'string' ? retry.body : JSON.stringify(retry.body);
+            else if (retry && retry.content) rbody = retry.content;
+            if (rbody) return JSON.parse(rbody);
+        } catch (e2) {}
         logLocal('ERROR', 'callEngine ' + action + ': ' + (e.message || String(e)));
         return { success: false, message: 'worker 调用失败: ' + (e.message || String(e)), action: action };
     }
@@ -187,6 +206,8 @@ exports.deploy_status = makeTool("deploy_status");
 exports.deploy_install = makeTool("deploy_install");
 exports.deploy_restart = makeTool("deploy_restart");
 exports.save_ui_state = makeTool("save_ui_state");
+exports.trigger_analysis = makeTool("trigger_analysis");
+exports.set_injection_settings = makeTool("set_injection_settings");
 exports.backup_engine = makeTool("backup_engine");
 exports.inspect_engine = makeTool("inspect_engine");
 exports.restore_engine = makeTool("restore_engine");
@@ -197,12 +218,16 @@ exports.get_logs = makeTool("get_logs");
 async function analyzeChat(params) {
     try {
         var chatId = (params && params.chat_id) || '';
-        // 未指定对话时，取最近对话
+        // 未指定对话时，取最近对话（listChats 排序参数不可靠，拉回一批后本地按 updatedAt 排序）
         if (!chatId) {
             try {
-                var chatList = await Tools.Chat.listChats({ sort_by: 'updatedAt', sort_order: 'desc', limit: 1 });
-                if (chatList && chatList.chats && chatList.chats.length > 0) {
-                    chatId = chatList.chats[0].id;
+                var chatList = await Tools.Chat.listChats({ limit: 20 });
+                var chats = (chatList && chatList.chats) || [];
+                if (chats.length > 0) {
+                    chats.sort(function (a, b) {
+                        return (b.updatedAt || b.updated_at || 0) - (a.updatedAt || a.updated_at || 0);
+                    });
+                    chatId = chats[0].id;
                 }
             } catch (e) {}
         }
@@ -210,10 +235,10 @@ async function analyzeChat(params) {
             complete({ success: false, message: '没有找到对话' });
             return;
         }
-        // 取对话消息
+        // 取对话消息（限 200 条防超长）
         var messages = [];
         try {
-            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc' });
+            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc', limit: 200 });
             if (msgResult && msgResult.messages) messages = msgResult.messages;
         } catch (e) {}
         if (messages.length === 0) {
@@ -231,6 +256,7 @@ async function analyzeChat(params) {
             lines.push(role + ': ' + c);
         }
         var chat_text = lines.join('\n');
+        if (chat_text.length > 20000) chat_text = chat_text.substring(0, 20000) + '...（截断）';
         if (chat_text.length < 10) {
             complete({ success: false, message: '对话内容过短' });
             return;
@@ -239,7 +265,7 @@ async function analyzeChat(params) {
         var rawEndpoint = '';
         try { rawEndpoint = getEnv('MEMORY_SYSTEM_ENDPOINT') || ''; } catch (e) {}
         var endpoint = rawEndpoint.replace(/\/+$/, '');
-        if (endpoint.indexOf('/chat/completions') < 0) endpoint = endpoint + '/chat/completions';
+        if (endpoint && endpoint.indexOf('/chat/completions') < 0) endpoint = endpoint + '/chat/completions';
         var apiKey = '';
         try { apiKey = getEnv('MEMORY_SYSTEM_KEY') || ''; } catch (e) {}
         var model = '';

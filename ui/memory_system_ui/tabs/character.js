@@ -18,9 +18,9 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   // 分类 chip 用 primary/tertiary 交替强调
   var catColors = [colors.primary, colors.tertiary, colors.error, colors.secondary];
   var personaState = ctx.useState('character_persona_context', {
-    id: String(ctx.getEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_ID') || ''),
-    name: String(ctx.getEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_NAME') || ''),
-    type: String(ctx.getEnv('MEMORY_SYSTEM_ACTIVE_PERSONA_TYPE') || '')
+    id: String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID') || ''),
+    name: String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME') || ''),
+    type: String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_TYPE') || '')
   });
   // 外部传入的角色上下文优先：screen 根 onLoad 加载后传入，避免依赖子组件副作用
   if (personaFromScreen && (!personaState[0] || !personaState[0].id) && personaFromScreen.id) {

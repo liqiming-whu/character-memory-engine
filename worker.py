@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "0.1.0"
+VERSION = "1.0.0"
 
 # 路径：支持环境变量/参数覆盖，默认探测（先脚本同目录，再真机固定路径）
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -186,16 +186,23 @@ CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512] dis
 
 def init_db(db_path):
     conn = get_conn(db_path)
-    conn.executescript(SCHEMA)
-    # 若 vec0 不可用（无 sqlite-vec），跳过虚拟表创建
+    # executescript 遇 vec0 不可用会抛异常，先逐表建基础表，vec0 单独容错
+    for stmt in [s for s in SCHEMA.split(";") if s.strip() and not s.strip().startswith("CREATE VIRTUAL")]:
+        try:
+            conn.execute(stmt)
+        except Exception:
+            conn.rollback()
+    conn.commit()
+    # vec0 虚拟表：可用则建，不可用静默降级（后续向量能力 VEC_AVAILABLE 为 False）
     try:
+        conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512] distance_metric=cosine)")
         conn.execute("SELECT COUNT(*) FROM vec_items")
+        conn.commit()
     except Exception:
         try:
-            conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS vec_items USING vec0(embedding float[512] distance_metric=cosine)")
+            conn.rollback()
         except Exception:
             pass
-    conn.commit()
     conn.close()
 
 
@@ -206,6 +213,11 @@ def normalize_text(text):
     s = s.lower()
     s = re.sub(r"[\s\.,，。！？、：:；;（）()\[\]{}<>\"'「」『』“”‘’]+", "", s)
     return s
+
+
+def escape_like(s):
+    """转义 LIKE 通配符 % _，使查询按字面匹配。"""
+    return (str(s or "").replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_"))
 
 
 def semantic_hash(category, title, content, character_id):
@@ -382,8 +394,8 @@ def search_memories(conn, params):
 
     # 无向量或结果不足时，关键词兜底
     if not results:
-        like = "%" + query + "%"
-        sql = "SELECT * FROM memories WHERE is_deleted=0 AND (title LIKE ? OR content LIKE ? OR description LIKE ?)"
+        like = "%" + escape_like(query) + "%"
+        sql = "SELECT * FROM memories WHERE is_deleted=0 AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')"
         args = [like, like, like]
         if character_id:
             sql += " AND character_id=?"
@@ -427,6 +439,8 @@ def row_to_obj(row):
         "content": row["content"],
         "description": row["description"],
         "timestamp": row["created_at"],  # 前端用 timestamp
+        "source": row["source"],
+        "updatedAt": row["updated_at"],
     }
     # 分类专属字段
     for sql_col, front_key in ROW_TO_FRONT.items():
@@ -492,8 +506,8 @@ def list_memories(conn, params):
         sql += " AND category=?"
         args.append(str(category))
     if query:
-        like = "%" + str(query) + "%"
-        sql += " AND (title LIKE ? OR content LIKE ? OR description LIKE ?)"
+        like = "%" + escape_like(query) + "%"
+        sql += " AND (title LIKE ? ESCAPE '\\' OR content LIKE ? ESCAPE '\\' OR description LIKE ? ESCAPE '\\')"
         args += [like, like, like]
     sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
     args += [limit, offset]
@@ -511,6 +525,7 @@ def list_memories(conn, params):
 
 def get_memory(conn, params):
     mid = params.get("id")
+    # 软删除仅标记（设计契约）：get 仍返回，由调用方决定是否显示
     row = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
     if not row:
         return {"success": False, "message": "memory not found"}
@@ -538,11 +553,41 @@ def create_memory(conn, params):
         # 方案 A 向量去重：文本相似度未命中，用 BGE 向量查库内近邻
         existing = vec_dedup(conn, category, title, content, character_id)
     if existing:
+        # 去重命中 → 全字段合并更新（新值覆盖旧值，旧值不丢新值）
+        merged = {}
+        for key in ["title", "content", "description", "type", "date", "time", "priority",
+                    "due_date", "completed", "importance", "relation", "start_date",
+                    "end_date", "symptoms", "amount", "extra_json"]:
+            new_val = params.get(key)
+            old_val = existing[key]
+            if new_val is not None and str(new_val) != "":
+                merged[key] = new_val
+            else:
+                merged[key] = old_val
         conn.execute(
-            "UPDATE memories SET updated_at=?, title=?, content=?, description=? WHERE id=?",
-            (now, title, content, params.get("description"), existing["id"]),
+            """UPDATE memories SET updated_at=?, title=?, content=?, description=?,
+               type=?, date=?, time=?, priority=?, due_date=?, completed=?, importance=?,
+               relation=?, start_date=?, end_date=?, symptoms=?, amount=?, extra_json=?
+               WHERE id=?""",
+            (now, merged["title"], merged["content"], merged["description"],
+             merged["type"], merged["date"], merged["time"], merged["priority"],
+             merged["due_date"], merged["completed"], merged["importance"],
+             merged["relation"], merged["start_date"], merged["end_date"],
+             merged["symptoms"], merged["amount"], merged["extra_json"],
+             existing["id"]),
         )
         conn.commit()
+        # 方案 A：合并后文本变了，刷新向量索引（先删旧向量再插，vec0 对 OR REPLACE 主键支持不一致）
+        embedder = get_embedder()
+        if embedder is not None:
+            try:
+                vec = embedder.embed((merged.get("title") or "") + " " + (merged.get("content") or ""), is_query=False)
+                vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+                conn.execute("DELETE FROM vec_items WHERE rowid=?", (existing["id"],))
+                conn.execute("INSERT INTO vec_items(rowid, embedding) VALUES (?, ?)", (existing["id"], vec_str))
+                conn.commit()
+            except Exception as e:
+                log("WARN", "dedup embed refresh failed: %s" % str(e))
         row = conn.execute("SELECT * FROM memories WHERE id=?", (existing["id"],)).fetchone()
         return {"success": True, "memory": row_to_obj(row), "deduped": True}
 
@@ -571,7 +616,8 @@ def create_memory(conn, params):
         try:
             vec = embedder.embed((title or "") + " " + (content or ""), is_query=False)
             vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
-            conn.execute("INSERT OR REPLACE INTO vec_items(rowid, embedding) VALUES (?, ?)", (mid, vec_str))
+            conn.execute("DELETE FROM vec_items WHERE rowid=?", (mid,))
+            conn.execute("INSERT INTO vec_items(rowid, embedding) VALUES (?, ?)", (mid, vec_str))
             conn.commit()
         except Exception as e:
             log("WARN", "embed write failed: %s" % str(e))
@@ -596,7 +642,7 @@ def update_memory(conn, params):
     conn.execute(
         """UPDATE memories SET title=?, content=?, description=?, type=?, date=?, time=?,
            priority=?, due_date=?, completed=?, importance=?, relation=?, start_date=?,
-           end_date=?, symptoms=?, amount=?, extra_json=?, updated_at=? WHERE id=?""",
+           end_date=?, symptoms=?, amount=?, extra_json=?, updated_at=? WHERE id=? AND is_deleted=0""",
         (
             new_row.get("title"), new_row.get("content"), new_row.get("description"),
             new_row.get("type"), new_row.get("date"), new_row.get("time"),
@@ -616,6 +662,11 @@ def update_memory(conn, params):
 def delete_memory(conn, params):
     mid = params.get("id")
     conn.execute("UPDATE memories SET is_deleted=1 WHERE id=?", (mid,))
+    # 软删同时移除向量索引，避免残留向量干扰去重/检索
+    try:
+        conn.execute("DELETE FROM vec_items WHERE rowid=?", (mid,))
+    except Exception as e:
+        log("WARN", "delete vec failed: %s" % str(e))
     conn.commit()
     return {"success": True, "id": mid}
 
@@ -634,9 +685,11 @@ def bulk_update_memories(conn, params):
                 update_memory(conn, {"id": mid, **merged})
                 updated += 1
         return {"success": True, "updated": updated}
-    # 无 ids：按 category 批量
+    # 无 ids：按 category 批量（必须至少提供 category 或 character_id 之一，防止误全库操作）
     category = params.get("category")
     character_id = params.get("character_id")
+    if not category and not character_id:
+        return {"success": False, "message": "bulk_update requires ids, category or character_id"}
     sql = "SELECT id FROM memories WHERE is_deleted=0"
     args = []
     if category:
@@ -662,6 +715,8 @@ def bulk_delete_memories(conn, params):
         return {"success": True, "deleted": len(ids)}
     category = params.get("category")
     character_id = params.get("character_id")
+    if not category and not character_id:
+        return {"success": False, "message": "bulk_delete requires ids, category or character_id"}
     sql = "UPDATE memories SET is_deleted=1 WHERE is_deleted=0"
     args = []
     if category:
@@ -682,7 +737,19 @@ def load_life_data(conn, params):
     for cat in LIFE_CATEGORIES:
         r = list_memories(conn, {"character_id": character_id, "category": cat, "limit": 5000})
         result[cat] = r["memories"]
-    return {"success": True, "extracted": result}
+    # 附带注入配置与 UI 状态（旧前端期望 load_life_data 一并返回）
+    injection = None
+    ui_state = None
+    ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+    if os.path.exists(ui_path):
+        try:
+            with open(ui_path, "r", encoding="utf-8") as f:
+                ui_data = json.load(f) or {}
+            ui_state = ui_data.get("data") if isinstance(ui_data.get("data"), dict) else {}
+            injection = ui_state.get("injection") if isinstance(ui_state, dict) else None
+        except Exception:
+            pass
+    return {"success": True, "extracted": result, "injection": injection, "uiState": {"data": ui_state}}
 
 
 def upsert_life_item(conn, params):
@@ -792,12 +859,24 @@ def save_relationship(conn, params):
     stage = params.get("stage")
     notes = params.get("notes")
     now = int(time.time() * 1000)
-    conn.execute(
-        "INSERT INTO relationships (character_id, target, stage, notes, updated_at) "
-        "VALUES (?,?,?,?,?) "
-        "ON CONFLICT DO UPDATE SET stage=COALESCE(?, stage), notes=COALESCE(?, notes), updated_at=?",
-        (character_id, target, stage, notes, now, stage, notes, now),
-    )
+    if not character_id or not target:
+        return {"success": False, "message": "character_id and target required"}
+    # 显式 upsert：无唯一约束，不能用 ON CONFLICT，先查再插/改
+    existing = conn.execute(
+        "SELECT id FROM relationships WHERE character_id=? AND target=?",
+        (character_id, target),
+    ).fetchone()
+    if existing:
+        conn.execute(
+            "UPDATE relationships SET stage=?, notes=?, updated_at=? WHERE id=?",
+            (stage, notes, now, existing["id"]),
+        )
+    else:
+        conn.execute(
+            "INSERT INTO relationships (character_id, target, stage, notes, updated_at) "
+            "VALUES (?,?,?,?,?)",
+            (character_id, target, stage, notes, now),
+        )
     conn.commit()
     return get_relationship(conn, params)
 
@@ -829,6 +908,9 @@ def get_logs(conn, params):
             f.seek(max(0, size - 128 * 1024))
             tail = f.read()
         lines = tail.splitlines()
+        # 若首行是 seek 边界截断的半行，丢弃它（读到的是不完整行）
+        if tail and not tail.startswith(lines[0]):
+            lines = lines[1:]
         if level:
             lines = [ln for ln in lines if (" %s " % level) in ln]
         return {"success": True, "log": lines[-n:], "path": path, "tail": len(lines[-n:]), "size": size}
@@ -947,8 +1029,48 @@ def save_ui_state(conn, params):
         return {"success": False, "message": "save failed: " + str(e)}
 
 
+def trigger_analysis(conn, params):
+    """自动分析探针（兼容旧前端初始化调用）。
+
+    新版自动分析由 main.js onPromptFinalize 冷却机制驱动，此处只需返回
+    started=false，前端据此跳过轮询，不再阻塞初始化。
+    """
+    return {"success": True, "started": False, "newMessageCount": 0, "message": "自动分析由 onPromptFinalize 冷却机制驱动"}
+
+
+def set_injection_settings(conn, params):
+    """保存记忆注入配置到 last_ui_state.json 的 injection 段（旧前端调用）。"""
+    injection = {
+        "enabled": bool(params.get("enabled", False)),
+        "persist": bool(params.get("persist", True)),
+        "maxMemories": int(params.get("max_memories") or params.get("maxMemories") or 5),
+    }
+    if injection["maxMemories"] < 1 or injection["maxMemories"] > 20:
+        injection["maxMemories"] = 5
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+    try:
+        data = {}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f) or {}
+            except Exception:
+                data = {}
+        if not isinstance(data, dict):
+            data = {}
+        ui_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        ui_data["injection"] = injection
+        data["data"] = ui_data
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+        return {"success": True, "injection": injection}
+    except Exception as e:
+        return {"success": False, "message": "save failed: " + str(e)}
+
+
 # ===== AI 分析 / 提取 =====
-EXTRACTION_PROMPT = """你是一个记忆系统。请理解以下对话整体讲了什么，然后提取有价值的信息。{persona_hint}
+# 注意：prompt 含大量 JSON 花括号，禁止用 .format()（会当占位符抛 KeyError），用 .replace() 注入变量
+EXTRACTION_PROMPT_TEMPLATE = """你是一个记忆系统。请理解以下对话整体讲了什么，然后提取有价值的信息。{persona_hint}
 
 核心原则：
 - 你是在理解一段对话后做总结，不是逐条扫描消息
@@ -973,6 +1095,14 @@ EXTRACTION_PROMPT = """你是一个记忆系统。请理解以下对话整体讲
 
 对话内容：
 {chat_text}"""
+
+
+def _build_extraction_prompt(persona_hint, existing_summary, chat_text):
+    """用 replace 注入变量（模板含 JSON 花括号，不能用 str.format）。"""
+    return (EXTRACTION_PROMPT_TEMPLATE
+            .replace("{persona_hint}", persona_hint)
+            .replace("{existing_summary}", existing_summary)
+            .replace("{chat_text}", chat_text))
 
 
 def _call_llm(endpoint, api_key, model, prompt):
@@ -1026,6 +1156,9 @@ def analyze_chat(conn, params):
         return {"success": False, "message": "对话内容过短"}
     if not endpoint or not api_key:
         return {"success": False, "message": "未配置 API Endpoint 或 Key"}
+    # 总量截断：防止长对话把 LLM 上下文撑爆（每段截 500 后累计仍可能过大）
+    if len(chat_text) > 20000:
+        chat_text = chat_text[:20000] + "...（截断）"
 
     # 读取已有数据用于去重提示
     existing_summary = ""
@@ -1053,11 +1186,7 @@ def analyze_chat(conn, params):
                     if character_id else
                     "\n当前没有可确认的角色卡，四个角色分类必须返回空数组。")
 
-    prompt = EXTRACTION_PROMPT.format(
-        persona_hint=persona_hint,
-        existing_summary=existing_summary,
-        chat_text=chat_text,
-    )
+    prompt = _build_extraction_prompt(persona_hint, existing_summary, chat_text)
 
     result = _call_llm(endpoint, api_key, model, prompt)
     if result is None:
@@ -1121,7 +1250,7 @@ def import_legacy_backup(conn, params):
         elif path.lower().endswith(".zip") and os.path.exists(path):
             extracted_dir = tempfile.mkdtemp(prefix="engine_import_")
             with zipfile.ZipFile(path) as zf:
-                zf.extractall(extracted_dir)
+                _safe_extract(zf, extracted_dir)
             base = extracted_dir
         else:
             return {"success": False, "message": "path must be dir or zip"}
@@ -1245,7 +1374,7 @@ def inspect_engine(conn, params):
             return {"success": False, "message": "backup not found"}
         tmp = tempfile.mkdtemp(prefix="engine_inspect_")
         with zipfile.ZipFile(path) as zf:
-            zf.extractall(tmp)
+            _safe_extract(zf, tmp)
         mf = os.path.join(tmp, "manifest.json")
         if not os.path.exists(mf):
             return {"success": False, "valid": False, "message": "missing manifest"}
@@ -1263,48 +1392,76 @@ def inspect_engine(conn, params):
 
 
 def restore_engine(conn, params):
-    """从 Engine 备份恢复（覆盖当前 db）。"""
+    """从 Engine 备份恢复。mode=overwrite 覆盖当前 db，mode=merge 逐条合并写入。
+
+    用 _RESTORE_LOCK 串行化，避免多线程覆盖活动 db 文件。
+    """
     import zipfile
     import tempfile
     import shutil
     path = params.get("path") or ""
     mode = params.get("mode") or "merge"
+    if mode not in ("merge", "overwrite"):
+        mode = "merge"
     if not path:
         return {"success": False, "message": "missing path"}
     tmp = None
-    try:
-        if not os.path.exists(path):
-            return {"success": False, "message": "backup not found"}
-        tmp = tempfile.mkdtemp(prefix="engine_restore_")
-        with zipfile.ZipFile(path) as zf:
-            zf.extractall(tmp)
-        mf = os.path.join(tmp, "manifest.json")
-        if not os.path.exists(mf):
-            return {"success": False, "message": "missing manifest"}
-        with open(mf, "r", encoding="utf-8") as f:
-            manifest = json.load(f)
-        if manifest.get("format") != "character-memory-engine-backup":
-            return {"success": False, "message": "invalid backup format"}
-
-        db_path = _current_db_path(conn)
-        src_db = os.path.join(tmp, "engine.db")
-        if not os.path.exists(src_db):
-            return {"success": False, "message": "backup missing engine.db"}
-
-        # 备份前保护当前 db
-        conn.close()
-        protect = db_path + ".pre_restore.bak"
+    with _RESTORE_LOCK:
         try:
-            shutil.copy(db_path, protect)
-        except Exception:
-            pass
-        shutil.copy(src_db, db_path)
-        return {"success": True, "mode": mode, "restoredAt": int(time.time() * 1000), "protection": protect}
-    except Exception as e:
-        return {"success": False, "message": "restore failed: " + str(e)}
-    finally:
-        if tmp:
-            shutil.rmtree(tmp, ignore_errors=True)
+            if not os.path.exists(path):
+                return {"success": False, "message": "backup not found"}
+            tmp = tempfile.mkdtemp(prefix="engine_restore_")
+            with zipfile.ZipFile(path) as zf:
+                _safe_extract(zf, tmp)
+            mf = os.path.join(tmp, "manifest.json")
+            if not os.path.exists(mf):
+                return {"success": False, "message": "missing manifest"}
+            with open(mf, "r", encoding="utf-8") as f:
+                manifest = json.load(f)
+            if manifest.get("format") != "character-memory-engine-backup":
+                return {"success": False, "message": "invalid backup format"}
+
+            db_path = _current_db_path(conn)
+            src_db = os.path.join(tmp, "engine.db")
+            if not os.path.exists(src_db):
+                return {"success": False, "message": "backup missing engine.db"}
+
+            if mode == "overwrite":
+                # 备份前保护当前 db（含 WAL/SHM，保证最近提交也在快照里）
+                conn.close()
+                protect = db_path + ".pre_restore.bak"
+                for suffix in ("", "-wal", "-shm"):
+                    try:
+                        if os.path.exists(db_path + suffix):
+                            shutil.copy(db_path + suffix, protect + suffix)
+                    except Exception:
+                        pass
+                shutil.copy(src_db, db_path)
+                return {"success": True, "mode": mode, "restoredAt": int(time.time() * 1000), "protection": protect}
+            else:
+                # merge：读备份库逐条 create_memory（幂等，语义去重）
+                bak_conn = get_conn(src_db)
+                try:
+                    rows = bak_conn.execute(
+                        "SELECT * FROM memories WHERE is_deleted=0 ORDER BY id"
+                    ).fetchall()
+                    merged = 0
+                    for r in rows:
+                        obj = row_to_obj(r)
+                        obj["category"] = r["category"]
+                        obj["character_id"] = r["character_id"] or None
+                        obj["source"] = r["source"] or "manual"
+                        create_memory(conn, obj)
+                        merged += 1
+                    return {"success": True, "mode": mode, "restoredAt": int(time.time() * 1000),
+                            "fileCount": merged}
+                finally:
+                    bak_conn.close()
+        except Exception as e:
+            return {"success": False, "message": "restore failed: " + str(e)}
+        finally:
+            if tmp:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 
@@ -1331,6 +1488,8 @@ ACTIONS = {
     "deploy_install": deploy_install,
     "deploy_restart": deploy_restart,
     "save_ui_state": save_ui_state,
+    "trigger_analysis": trigger_analysis,
+    "set_injection_settings": set_injection_settings,
     "analyze_chat": analyze_chat,
     "backup_engine": backup_engine,
     "inspect_engine": inspect_engine,
@@ -1349,7 +1508,8 @@ def handle_action(db_path, action, params):
             return {"success": False, "message": "unknown action: " + str(action)}
         return fn(conn, params or {})
     except Exception as e:
-        log("ERROR", "handle_action failed action=%s\n%s" % (action, traceback.format_exc()))
+        tb = " | ".join(line.strip() for line in traceback.format_exc().splitlines() if line.strip())
+        log("ERROR", "handle_action failed action=%s: %s" % (action, tb))
         return {"success": False, "message": "error: " + str(e)}
     finally:
         conn.close()
@@ -1390,6 +1550,19 @@ class Handler(BaseHTTPRequestHandler):
 
 
 # ===== 备份 / 恢复（Engine 格式：SQLite db + 配置打包 ZIP）=====
+_RESTORE_LOCK = threading.Lock()
+
+
+def _safe_extract(zf, dest):
+    """安全解压：校验每个成员路径都在 dest 内，防 zip-slip 穿越。"""
+    import posixpath
+    for member in zf.infolist():
+        target = os.path.realpath(os.path.join(dest, member.filename))
+        if not target.startswith(os.path.realpath(dest) + os.sep) and target != os.path.realpath(dest):
+            raise ValueError("zip entry escapes target dir: %s" % member.filename)
+    zf.extractall(dest)
+
+
 def _current_db_path(conn):
     """从连接获取当前 db 文件路径。"""
     try:

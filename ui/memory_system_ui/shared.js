@@ -57,7 +57,8 @@ function multiMatch(text, query) {
 function inDateRange(timestamp, start, end) {
   if (!start && !end) return true;
   if (!timestamp) return false;
-  var d = timestamp.substring(0, 10);
+  // timestamp 可能是毫秒整数（worker created_at），先字符串化再取前 10 位
+  var d = String(timestamp).substring(0, 10);
   if (start && d < start) return false;
   if (end && d > end) return false;
   return true;

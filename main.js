@@ -18,11 +18,18 @@ var TRIGGER_FILE = '/sdcard/Download/character_memory_engine/trigger.json';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
+// Worker 地址：统一走 env 覆盖（与 memory_engine.js workerUrl 一致），默认 8765
+function workerUrl() {
+    var u = '';
+    try { u = getEnv('MEMORY_ENGINE_WORKER_URL') || ''; } catch (e) {}
+    return u || 'http://127.0.0.1:' + WORKER_PORT;
+}
+
 // 写日志：经 worker log_event 落到 engine.log（fire-and-forget，失败不影响业务）
 function jsLog(level, msg) {
   try {
     Tools.Net.http({
-      url: 'http://127.0.0.1:' + WORKER_PORT,
+      url: workerUrl(),
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ action: 'log_event', params: { level: level, message: msg } }),
@@ -33,7 +40,18 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
-async function ensureWorkerRunning() {
+// ensureWorkerRunning 单例：并发调用共享同一次启动，避免重复拉起 worker
+var _ensureRunningPromise = null;
+function ensureWorkerRunning() {
+    if (!_ensureRunningPromise) {
+        _ensureRunningPromise = doEnsureWorkerRunning().finally(function() {
+            _ensureRunningPromise = null;
+        });
+    }
+    return _ensureRunningPromise;
+}
+
+async function doEnsureWorkerRunning() {
     try {
         // 1) 检查 worker HTTP 是否已在运行
         var ok = await pingWorker();
@@ -69,7 +87,7 @@ async function ensureWorkerRunning() {
 
 async function pingWorker() {
     try {
-        var url = 'http://127.0.0.1:' + WORKER_PORT;
+        var url = workerUrl();
         var resp = await Tools.Net.http({
             url: url,
             method: 'POST',
@@ -80,9 +98,15 @@ async function pingWorker() {
         });
         var body = '';
         if (typeof resp === 'string') body = resp;
-        else if (resp && resp.body) body = resp.body;
+        else if (resp && resp.body) body = typeof resp.body === 'string' ? resp.body : JSON.stringify(resp.body);
         else if (resp && resp.content) body = resp.content;
-        return body && body.indexOf('"success"') >= 0;
+        if (!body) return false;
+        try {
+            var parsed = JSON.parse(body);
+            return parsed && parsed.success === true;
+        } catch (e) {
+            return false;
+        }
     } catch (e) {
         return false;
     }
@@ -136,11 +160,11 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
         endpoint: endpoint,
         api_key: apiKey,
         model: model,
-        character_id: callerCardId || undefined,
+        character_id: callerCardId ? String(callerCardId) : undefined,
         persona_name: personaName || ''
       }
     };
-    var url = 'http://127.0.0.1:' + WORKER_PORT;
+    var url = workerUrl();
     var resp = await Tools.Net.http({
       url: url,
       method: 'POST',
@@ -152,10 +176,11 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
     });
     var rbody = '';
     if (typeof resp === 'string') rbody = resp;
-    else if (resp && resp.body) rbody = resp.body;
+    else if (resp && resp.body) rbody = typeof resp.body === 'string' ? resp.body : JSON.stringify(resp.body);
     else if (resp && resp.content) rbody = resp.content;
     var resObj = null;
-    try { resObj = JSON.parse(rbody); } catch (e) {}
+    if (typeof rbody === 'string') { try { resObj = JSON.parse(rbody); } catch (e) {} }
+    else resObj = rbody;
     if (resObj && resObj.success) {
       jsLog('INFO', 'autoAnalyze 完成 chatId=' + chatId + ' stats=' + JSON.stringify(resObj.stats || {}));
     } else {
@@ -168,12 +193,13 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
 async function onPromptFinalize(input) {
-  var stage = String(input.eventPayload.stage ?? input.eventName ?? "");
+  var evt = (input && input.eventPayload) || {};
+  var stage = String(evt.stage ?? input.eventName ?? "");
   if (stage !== "before_send_to_model") return null;
   try {
     var now = Date.now();
-    var currentChatId = String(input.eventPayload.chatId || "").trim();
-    var activePrompt = input.eventPayload.metadata && input.eventPayload.metadata.activePrompt;
+    var currentChatId = String(evt.chatId || "").trim();
+    var activePrompt = evt.metadata && evt.metadata.activePrompt;
     var callerCardId = (activePrompt && activePrompt.type === 'character_card') ? String(activePrompt.id || '') : '';
     var personaName = (activePrompt && activePrompt.name) ? String(activePrompt.name || '') : '';
 

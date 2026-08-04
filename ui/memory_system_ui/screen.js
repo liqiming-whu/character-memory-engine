@@ -177,8 +177,9 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
   if (!dataLoadedState[0] && !dataLoadScheduledRef.current) {
     dataLoadScheduledRef.current = true;
     setTimeout(function() {
-      loadData().then(function() { dataLoadedState[1](true); })
-        .finally(function() { dataLoadScheduledRef.current = false; });
+      loadData().then(function(ok) {
+        if (ok) dataLoadedState[1](true); // 失败不置 loaded，后续帧会重试
+      }).finally(function() { dataLoadScheduledRef.current = false; });
     }, 0);
   }
   // ===== 初始化时加载记忆 =====
@@ -192,7 +193,7 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
 
   // ===== 角色页：进入时自动加载角色上下文与记忆（与知识页同款 setTimeout 模式）=====
   // 每次进入角色 tab 都重新加载，不因之前加载过而跳过；ref 仅防同帧重复。
-  if (currentTab === 3 && !characterLoadScheduledRef.current) {
+  if (currentTab === 4 && !characterLoadScheduledRef.current) {
     characterLoadScheduledRef.current = true;
     setTimeout(function() {
       loadScreenPersona().finally(function() { characterLoadScheduledRef.current = false; });
@@ -307,8 +308,10 @@ loadingChatsState[1](false);
             menstrual: r.extracted && r.extracted.menstrual || []
           }));
         } catch(ex) {}
+        return true;
       }
     } catch (e) {}
+    return false;
   }
 
   async function loadScreenPersona() {
@@ -486,7 +489,7 @@ loadingChatsState[1](false);
       var resRaw = await ctx.callTool('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
       var res = parseResult(resRaw);
       if (res && res.success) {
-        backupResultState[1]('✅ 恢复完成（' + res.mode + ' 模式，' + (res.fileCount || 0) + ' 个文件）');
+        backupResultState[1]('✅ 恢复完成（' + (res.mode || 'merge') + ' 模式' + (res.fileCount !== undefined ? '，' + res.fileCount + ' 个文件' : '') + '）');
         await loadData();
       } else {
         backupResultState[1]('❌ ' + ((res && res.message) || '恢复失败'));

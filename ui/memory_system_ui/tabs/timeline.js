@@ -37,6 +37,8 @@ function render(ctx, allData, states, actions) {
 
   // 筛选经期
   var filteredMenstrual = allMenstrual.filter(function(m) {
+    if (!inDateRange(m.timestamp || m.startDate, dateStart, dateEnd)) return false;
+    if (filterType && filterType !== 'menstrual') return false;
     if (!multiMatch((m.startDate||'') + ' ' + (m.symptoms||''), q)) return false;
     return true;
   });
