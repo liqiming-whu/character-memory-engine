@@ -47,11 +47,17 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
-# 路径：支持环境变量/参数覆盖，默认探测（先脚本同目录，再真机固定路径）
+# 路径：支持环境变量/参数覆盖。
+# 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/character_memory_engine，
+# 用户无需 root 即可访问；models 只读，可留在脚本目录或 /root。
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.environ.get("MEMORY_ENGINE_DB", os.path.join(_SCRIPT_DIR, "engine.db"))
+DATA_DIR = os.environ.get(
+    "MEMORY_ENGINE_DATA_DIR",
+    "/sdcard/Download/character_memory_engine",
+)
+DB_PATH = os.environ.get("MEMORY_ENGINE_DB", os.path.join(DATA_DIR, "engine.db"))
 MODEL_DIR = os.environ.get("MEMORY_ENGINE_MODEL_DIR", "")
 if not MODEL_DIR or not os.path.exists(MODEL_DIR):
     _local_models = os.path.join(_SCRIPT_DIR, "models")
@@ -70,10 +76,10 @@ ALL_CATEGORIES = LIFE_CATEGORIES + ROLE_CATEGORIES
 
 
 # ===== 日志 =====
-# 写 <script_dir>/logs/engine.log（真机：/sdcard/Download/character_memory_engine/logs/engine.log），
-# 与 backups/、engine.db 同风格，可被插件 get_logs 读取。env MEMORY_ENGINE_LOG 可覆盖路径。
+# 写 <数据目录>/logs/engine.log（真机：/sdcard/Download/character_memory_engine/logs/engine.log），
+# 用户无需 root 即可访问，可被插件 get_logs 读取。env MEMORY_ENGINE_LOG 可覆盖路径。
 _LOG_LOCK = threading.Lock()
-LOG_PATH = os.environ.get("MEMORY_ENGINE_LOG", os.path.join(_SCRIPT_DIR, "logs", "engine.log"))
+LOG_PATH = os.environ.get("MEMORY_ENGINE_LOG", os.path.join(DATA_DIR, "logs", "engine.log"))
 LOG_MAX_BYTES = 1024 * 1024  # 超 1MB 轮转为 engine.log.1
 
 
@@ -99,7 +105,13 @@ def log(level, msg):
 def get_conn(db_path):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    # FAT/exFAT 文件系统不支持 WAL（返回 journal_mode=delete），ext4 用 WAL 提升并发
+    try:
+        mode = conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+        if mode != "wal":
+            conn.execute("PRAGMA journal_mode=DELETE")
+    except Exception:
+        pass
     conn.execute("PRAGMA foreign_keys=ON")
     # 加载 sqlite-vec 扩展（方案 A）
     if VEC_AVAILABLE:
@@ -740,7 +752,7 @@ def load_life_data(conn, params):
     # 附带注入配置与 UI 状态（旧前端期望 load_life_data 一并返回）
     injection = None
     ui_state = None
-    ui_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+    ui_path = os.path.join(DATA_DIR, "last_ui_state.json")
     if os.path.exists(ui_path):
         try:
             with open(ui_path, "r", encoding="utf-8") as f:
@@ -920,11 +932,16 @@ def get_logs(conn, params):
 
 # ===== 部署状态 / 安装 / 重启 =====
 def _find_worker_processes():
-    """查找本 worker 进程（含重复）。返回 (count, pids)。"""
+    """查找本 worker 进程（含重复）。返回 (count, pids)。
+
+    只匹配真正的 python worker 进程：Operit 会用隐藏 shell 包装启动命令，
+    其 cmdline 也含 worker.py，用 pgrep -f worker.py 会误匹配到 shell 脚本 PID。
+    这里用 pgrep -f "python.*worker.py" 匹配 python 解释器命令行。
+    """
     import subprocess
     try:
         out = subprocess.check_output(
-            ["pgrep", "-f", "worker.py"], stderr=subprocess.DEVNULL
+            ["pgrep", "-f", r"python.*worker\.py"], stderr=subprocess.DEVNULL
         ).decode().strip()
         pids = [p for p in out.split("\n") if p.strip()]
         return len(pids), pids
@@ -968,14 +985,18 @@ def deploy_status(conn, params):
     emb = get_embedder()
     status["vec_available"] = emb is not None
     # db
-    status["db_ok"] = os.path.exists(params.get("db") or os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db")))
-    status["db_path"] = params.get("db") or os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db"))
+    status["db_ok"] = os.path.exists(params.get("db") or DB_PATH)
+    status["db_path"] = params.get("db") or DB_PATH
     status["port"] = int(params.get("port") or 8765)
     return {"success": True, "status": status}
 
 
 def deploy_install(conn, params):
-    """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）。"""
+    """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）。
+
+    Operit Ubuntu 是 externally-managed（PEP 668），直接 pip install 会被拒，
+    需加 --break-system-packages；且用 venv python 时依赖装到 venv。
+    """
     import subprocess
     missing = []
     if not _check_module("onnxruntime"):
@@ -986,9 +1007,16 @@ def deploy_install(conn, params):
         missing.append("tokenizers")
     if not missing:
         return {"success": True, "installed": [], "message": "依赖已齐全"}
-    cmd = [sys.executable, "-m", "pip", "install"] + missing
+    # --break-system-packages 绕过 PEP 668；真机 venv（/root/.venv）通常无此限制但加上无害
+    cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade"] + missing
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            return {"success": False, "message": "安装失败: " + (r.stderr or r.stdout or "")[-500:]}
+        # 二次确认实际装成功
+        still_missing = [m for m in missing if not _check_module(m.replace("-", "_"))]
+        if still_missing:
+            return {"success": False, "message": "部分依赖仍未安装: " + ", ".join(still_missing)}
         return {"success": True, "installed": missing, "message": "已安装: " + ", ".join(missing)}
     except Exception as e:
         return {"success": False, "message": "安装失败: " + str(e)}
@@ -1021,7 +1049,7 @@ def save_ui_state(conn, params):
     except Exception:
         parsed = state
     try:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+        path = os.path.join(DATA_DIR, "last_ui_state.json")
         with open(path, "w", encoding="utf-8") as f:
             json.dump({"version": 1, "data": parsed}, f, ensure_ascii=False)
         return {"success": True, "path": path}
@@ -1047,7 +1075,7 @@ def set_injection_settings(conn, params):
     }
     if injection["maxMemories"] < 1 or injection["maxMemories"] > 20:
         injection["maxMemories"] = 5
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+    path = os.path.join(DATA_DIR, "last_ui_state.json")
     try:
         data = {}
         if os.path.exists(path):
@@ -1321,7 +1349,7 @@ def backup_engine(conn, params):
     import shutil
     try:
         db_path = _current_db_path(conn)
-        bkp_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "backups")
+        bkp_dir = os.path.join(DATA_DIR, "backups")
         os.makedirs(bkp_dir, exist_ok=True)
 
         ts = int(time.time() * 1000)
@@ -1337,7 +1365,7 @@ def backup_engine(conn, params):
         dest.close()
 
         # 附带 UI 状态
-        ui_state = os.path.join(os.path.dirname(os.path.abspath(__file__)), "last_ui_state.json")
+        ui_state = os.path.join(DATA_DIR, "last_ui_state.json")
         manifest = {
             "format": "character-memory-engine-backup",
             "version": 1,
@@ -1571,7 +1599,7 @@ def _current_db_path(conn):
             return row["file"]
     except Exception:
         pass
-    return os.environ.get("MEMORY_ENGINE_DB", os.path.join(os.path.dirname(os.path.abspath(__file__)), "engine.db"))
+    return os.environ.get("MEMORY_ENGINE_DB", os.path.join(DATA_DIR, "engine.db"))
 
 
 def main():

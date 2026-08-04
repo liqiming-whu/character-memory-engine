@@ -111,43 +111,24 @@ function render(ctx) {
   items.push(UI.Text({ text: '检查 Worker 进程、依赖与模型状态；首次启动请先检查部署。', style: 'bodySmall', color: colors.onSurfaceVariant }));
   items.push(UI.Spacer({ height: 8 }));
 
-  // 操作按钮
+  // 操作按钮（两行：第一行 检查状态/安装依赖/重启，第二行 查看日志/诊断）
+  function actionBtn(label, icon, bg, fg, onClick) {
+    return UI.Surface({ weight: 1, shape: { cornerRadius: 8 }, containerColor: bg, padding: { left: 8, right: 8, top: 8, bottom: 8 }, onClick: onClick }, [
+      UI.Column({ horizontalAlignment: 'center', spacing: 3 }, [
+        UI.Icon({ name: icon, tint: fg, size: 16 }),
+        UI.Text({ text: label, style: 'labelSmall', color: fg, fontWeight: 'bold' }),
+      ]),
+    ]);
+  }
   items.push(UI.Row({ fillMaxWidth: true, spacing: 8 }, [
-    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.primary, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: checkStatus }, [
-      UI.Row({ verticalAlignment: 'center' }, [
-        UI.Icon({ name: 'refresh', tint: colors.onPrimary, size: 16 }),
-        UI.Spacer({ width: 4 }),
-        UI.Text({ text: '检查状态', style: 'labelSmall', color: colors.onPrimary, fontWeight: 'bold' }),
-      ]),
-    ]),
-    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.primaryContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: doInstall }, [
-      UI.Row({ verticalAlignment: 'center' }, [
-        UI.Icon({ name: 'download', tint: colors.primary, size: 16 }),
-        UI.Spacer({ width: 4 }),
-        UI.Text({ text: '安装依赖', style: 'labelSmall', color: colors.primary, fontWeight: 'bold' }),
-      ]),
-    ]),
-    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.tertiaryContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: doRestart }, [
-      UI.Row({ verticalAlignment: 'center' }, [
-        UI.Icon({ name: 'restart_alt', tint: colors.tertiary, size: 16 }),
-        UI.Spacer({ width: 4 }),
-        UI.Text({ text: '重启 Worker', style: 'labelSmall', color: colors.tertiary, fontWeight: 'bold' }),
-      ]),
-    ]),
-    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.secondaryContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: loadLogs }, [
-      UI.Row({ verticalAlignment: 'center' }, [
-        UI.Icon({ name: 'receipt_long', tint: colors.secondary, size: 16 }),
-        UI.Spacer({ width: 4 }),
-        UI.Text({ text: logLoadingState[0] ? '加载中...' : '查看日志', style: 'labelSmall', color: colors.secondary, fontWeight: 'bold' }),
-      ]),
-    ]),
-    UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.errorContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: runDiagnosis }, [
-      UI.Row({ verticalAlignment: 'center' }, [
-        UI.Icon({ name: 'bug_report', tint: colors.error, size: 16 }),
-        UI.Spacer({ width: 4 }),
-        UI.Text({ text: '诊断', style: 'labelSmall', color: colors.error, fontWeight: 'bold' }),
-      ]),
-    ]),
+    actionBtn('检查状态', 'refresh', colors.primary, colors.onPrimary, checkStatus),
+    actionBtn('安装依赖', 'download', colors.primaryContainer, colors.primary, doInstall),
+    actionBtn('重启 Worker', 'restart_alt', colors.tertiaryContainer, colors.tertiary, doRestart),
+  ]));
+  items.push(UI.Spacer({ height: 8 }));
+  items.push(UI.Row({ fillMaxWidth: true, spacing: 8 }, [
+    actionBtn(logLoadingState[0] ? '加载中...' : '查看日志', 'receipt_long', colors.secondaryContainer, colors.secondary, loadLogs),
+    actionBtn('诊断', 'bug_report', colors.errorContainer, colors.error, runDiagnosis),
   ]));
   items.push(UI.Spacer({ height: 8 }));
 
@@ -162,8 +143,8 @@ function render(ctx) {
           : [
               UI.Text({ text: 'Worker 进程: ' + (dg.worker_up ? '运行中 (' + (dg.process_count || 0) + ' 个)' : '未运行'), style: 'labelSmall', color: dg.worker_up ? '#4CAF50' : colors.error }),
               dg.pids && dg.pids.length ? UI.Text({ text: 'PID: ' + dg.pids.join(', '), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
-              dg.tmp_log_tail ? UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + dg.tmp_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
-              dg.engine_log_tail ? UI.Text({ text: 'engine.log 尾部:\n' + dg.engine_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
+              dg.tmp_log_tail ? UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + dg.tmp_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]) : null,
+              dg.engine_log_tail ? UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: 'engine.log 尾部:\n' + dg.engine_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]) : null,
             ],
       ]),
     ]));
@@ -194,11 +175,30 @@ function render(ctx) {
               UI.Text({ text: f[1], style: 'labelSmall', color: active ? colors.onPrimary : colors.onSurface, fontWeight: active ? 'bold' : 'normal' }),
             ]);
           }),
+          // 复制日志：写入剪贴板并 toast 反馈
+          (lg.lines && lg.lines.length) ? UI.Surface({
+            shape: { cornerRadius: 6 },
+            containerColor: colors.tertiaryContainer,
+            padding: { left: 8, right: 8, top: 3, bottom: 3 },
+            onClick: function () {
+              var txt = lg.lines.join('\n');
+              try {
+                if (ctx.setClipboard) ctx.setClipboard(txt);
+                if (Tools && Tools.toast) Tools.toast('日志已复制 (' + lg.lines.length + ' 行)');
+              } catch (e) {
+                try { if (Tools && Tools.toast) Tools.toast('复制失败，请长按日志文本手动复制'); } catch (e2) {}
+              }
+            }
+          }, [
+            UI.Text({ text: '复制', style: 'labelSmall', color: colors.tertiary, fontWeight: 'bold' }),
+          ]) : null,
         ]),
         lg.error
           ? UI.Text({ text: lg.error, style: 'labelSmall', color: colors.error })
           : (lg.lines && lg.lines.length
-            ? UI.Text({ text: lg.lines.join('\n'), style: 'bodySmall', color: colors.onSurfaceVariant, fontFamily: 'monospace', fontSize: 10 })
+            ? UI.SelectionContainer({ fillMaxWidth: true }, [
+                UI.Text({ text: lg.lines.join('\n'), style: 'bodySmall', color: colors.onSurfaceVariant, fontFamily: 'monospace', fontSize: 10 }),
+              ])
             : UI.Text({ text: '暂无日志', style: 'labelSmall', color: colors.onSurfaceVariant })),
         lg.path ? UI.Text({ text: lg.path, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) : null,
       ]),
