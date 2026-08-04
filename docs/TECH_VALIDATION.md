@@ -69,3 +69,37 @@ Character Memory Engine 的完整技术栈（SQLite + sqlite-vec + onnxruntime +
 - 模型文件（23.9MB）首次获取需网络（代理）；后续可考虑随 ToolPkg 资源打包
 - int8 量化精度足够语义去重/检索，但若需更高精度可评估 `model.onnx`（fp32，约 95MB）
 - GPU 不可用（proot 无 DRM），仅 CPU 推理，单次嵌入延迟需实测（预计几十~几百 ms/条）
+
+---
+
+# 真机验收记录（2026-08-05）
+
+## 状态
+
+✅ **方案 A（8 项）+ 方案 B（22 项）测试在真机 proot Ubuntu 24 全部通过。**
+
+## 部署方式（真机）
+
+- 代码目录：`/sdcard/Download/character_memory_engine/`
+- 模型：直接**复制**（非软链）——Android 外部存储（FAT）**不支持符号链接**（`ln -s` 报 Permission denied）
+  - `model_int8.onnx`（23.9MB）+ `tokenizer.json`（439KB）+ `config.json`（716B）→ `models/`
+  - 复制比软链更稳（不怕 HF 缓存被清）
+- 运行：`source /root/.venv/bin/activate && python test_worker_a.py`
+
+## 真机测试结果
+
+| 测试 | 结果 |
+|---|---|
+| 方案 A：embedder 加载 | ✅ |
+| 方案 A：向量语义去重（奶茶 vs 爱喝奶茶） | ✅ 合并，库保持 1 条 |
+| 方案 A：语义无关（健身房） | ✅ 不合并 |
+| 方案 A：语义检索（奶茶/健身房） | ✅ 命中且排序靠前 |
+| 方案 B：数据层 22 项（CRUD/字段映射/角色隔离/批量/软删除/toggle） | ✅ 全过 |
+
+## 关键结论
+
+1. **完整技术栈（SQLite + sqlite-vec + onnxruntime + BGE）真机可用**，方案 A 与方案 B 均通过。
+2. **模型部署用复制不用软链**（FAT 文件系统不支持符号链接）。
+3. **路径适配**：`test_worker_a.py` 用 `os.path.dirname(__file__)/models` 相对路径，代码与 models 同目录即可自动适配真机路径。
+4. **GPU 警告**：proot 无 DRM 权限，CPU 推理正常，警告可忽略。
+5. worker.py 正式运行的硬编码路径（`/root/character_memory_engine/`）在 P3 插件接入时需改为可配置/相对路径。

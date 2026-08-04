@@ -501,11 +501,12 @@ loadingChatsState[1](false);
     analyzingState[1](true);
     resultState[1]('🔄 分析中...');
     try {
-      var raw = await ctx.callTool('memory_system:analyze_saved_messages', {});
+      var raw = await ctx.callTool('memory_engine:analyze_chat', {});
       var r = parseResult(raw);
       if (r && r.success) {
         await loadData();
-        resultState[1]('✅ 完成：' + (r.events||0) + ' 事件，' + (r.todos||0) + ' 待办');
+        var st = r.stats || {};
+        resultState[1]('✅ 分析完成：提取 ' + (st.items || 0) + ' 条（合并 ' + (st.deduped || 0) + ' 条重复）');
       } else {
         resultState[1]((r && r.message) || '❌ 分析失败');
       }

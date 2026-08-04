@@ -889,6 +889,149 @@ def save_ui_state(conn, params):
         return {"success": False, "message": "save failed: " + str(e)}
 
 
+# ===== AI 分析 / 提取 =====
+EXTRACTION_PROMPT = """你是一个记忆系统。请理解以下对话整体讲了什么，然后提取有价值的信息。{persona_hint}
+
+核心原则：
+- 你是在理解一段对话后做总结，不是逐条扫描消息
+- 一段对话可能只产生0-2条有价值的提取，这是正常的
+- 过程噪音（反复调试、重复提问、工具调用细节）不要提取
+- 无效信息（"继续""好的""开始"等）完全忽略
+- 如果与已有数据语义重复，不要重复提取；同一事件措辞不同但语义相同也只保留一条
+- 不推断未明确表达的人格、感情或关系等级
+{existing_summary}
+返回纯JSON（不要markdown代码块，不要任何额外文字）：
+{"events":[{"type":"activity|schedule|observation|milestone|mood","title":"标题","description":"描述","importance":"high|medium|low","date":"YYYY-MM-DD","time":"HH:MM"}],"todos":[{"title":"待办事项","description":"描述","priority":"high|medium|low","dueDate":"YYYY-MM-DD或null","completed":false}],"contacts":[{"name":"姓名","relation":"friend|family|colleague|classmate|service|other","attributes":[{"key":"属性名","value":"值"}],"context":"提到这个人的场景"}],"info":[{"category":"类别","content":"内容"}],"finance":[{"type":"expense|income","category":"类别","amount":0,"description":"描述","date":"YYYY-MM-DD"}],"menstrual":[{"startDate":"YYYY-MM-DD","endDate":"YYYY-MM-DD或null","symptoms":"症状描述"}],"character":[{"title":"标题","content":"角色身份或背景事实"}],"relationship":[{"title":"标题","content":"用户与角色的明确关系事实或共同经历"}],"preference":[{"title":"标题","content":"用户或角色明确表达的偏好"}],"interaction_rule":[{"title":"标题","content":"明确约定的称呼、回复风格或互动边界"}]}
+
+提取规则：
+1. events：有记录价值的事件。activity=做了什么事；schedule=有时间安排的事；observation=发现的现象；milestone=阶段性变化；mood=情绪
+2. todos：用户明确要做的事，不是已经做完的事
+3. contacts：提到的人物及其属性
+4. info：值得记住的知识/事实/参数
+5. finance：涉及花钱或收钱的记录
+6. menstrual：经期记录
+7. character/relationship/preference/interaction_rule：仅在存在当前角色卡且事实明确时提取
+8. 某类没数据用空数组；同一件事不要拆成多条
+
+对话内容：
+{chat_text}"""
+
+
+def _call_llm(endpoint, api_key, model, prompt):
+    """调用 OpenAI 兼容接口，返回解析后的 JSON dict 或 None。"""
+    import urllib.request
+    endpoint = endpoint.rstrip("/")
+    if "/chat/completions" not in endpoint:
+        endpoint = endpoint + "/chat/completions"
+    body = json.dumps({
+        "model": model or "gpt-4o-mini",
+        "messages": [
+            {"role": "system", "content": "你是一个对话分析助手，只返回JSON格式数据，不要返回任何其他内容。"},
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 4096,
+    }).encode("utf-8")
+    req = urllib.request.Request(endpoint, data=body, headers={
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + (api_key or ""),
+    })
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        raw = resp.read().decode("utf-8")
+    data = json.loads(raw)
+    content = ""
+    if data.get("choices") and data["choices"][0].get("message"):
+        content = data["choices"][0]["message"].get("content") or ""
+    elif data.get("content"):
+        content = data["content"]
+    if not content:
+        return None
+    # 提取 JSON 对象
+    import re as _re
+    m = _re.search(r"\{[\s\S]*\}", content)
+    if not m:
+        return None
+    try:
+        return json.loads(m.group(0))
+    except Exception:
+        return None
+
+
+def analyze_chat(conn, params):
+    """AI 分析对话并提取结构化记忆，写入 SQLite（语义去重）。"""
+    chat_text = params.get("chat_text") or ""
+    endpoint = params.get("endpoint") or ""
+    api_key = params.get("api_key") or ""
+    model = params.get("model") or "gpt-4o-mini"
+    character_id = params.get("character_id") or None
+    if not chat_text or len(chat_text.strip()) < 10:
+        return {"success": False, "message": "对话内容过短"}
+    if not endpoint or not api_key:
+        return {"success": False, "message": "未配置 API Endpoint 或 Key"}
+
+    # 读取已有数据用于去重提示
+    existing_summary = ""
+    try:
+        existing = {}
+        for cat in LIFE_CATEGORIES:
+            r = list_memories(conn, {"character_id": character_id, "category": cat, "limit": 20})
+            existing[cat] = r["memories"]
+        parts = []
+        if existing.get("todos"):
+            parts.append("已有待办: " + "; ".join(t.get("title", "") for t in existing["todos"][-10:]))
+        if existing.get("events"):
+            parts.append("已有事件: " + "; ".join(e.get("title", "") for e in existing["events"][-10:]))
+        if existing.get("info"):
+            parts.append("已有信息: " + "; ".join(i.get("content", "") for i in existing["info"][-10:]))
+        if existing.get("contacts"):
+            parts.append("已有联系人: " + "; ".join(c.get("name", "") for c in existing["contacts"]))
+        if parts:
+            existing_summary = "\n\n【已有数据——不要重复提取语义相同的内容】\n" + "\n".join(parts) + "\n"
+    except Exception:
+        existing_summary = ""
+
+    persona_hint = ("\n当前角色卡：" + params.get("persona_name", "") +
+                    "。仅提取对该角色长期互动确有价值且由本段对话明确支持的内容。"
+                    if character_id else
+                    "\n当前没有可确认的角色卡，四个角色分类必须返回空数组。")
+
+    prompt = EXTRACTION_PROMPT.format(
+        persona_hint=persona_hint,
+        existing_summary=existing_summary,
+        chat_text=chat_text,
+    )
+
+    result = _call_llm(endpoint, api_key, model, prompt)
+    if result is None:
+        return {"success": False, "message": "AI 提取失败或返回格式错误"}
+
+    # 写入 SQLite（逐条 create_memory，语义去重）
+    stats = {"items": 0, "deduped": 0, "errors": 0, "categories": 0}
+    for cat in LIFE_CATEGORIES + ["character", "relationship", "preference", "interaction_rule"]:
+        items = result.get(cat) or []
+        if not items:
+            continue
+        stats["categories"] += 1
+        for item in items:
+            p = dict(item)
+            p["category"] = cat
+            if character_id:
+                p["character_id"] = character_id
+            if cat in ROLE_CATEGORIES:
+                p.setdefault("source", "ai_role")
+            else:
+                p.setdefault("source", "ai_life")
+            r = create_memory(conn, p)
+            if r.get("success"):
+                stats["items"] += 1
+                if r.get("deduped"):
+                    stats["deduped"] += 1
+            else:
+                stats["errors"] += 1
+
+    return {"success": True, "stats": stats}
+
+
 def import_legacy_backup(conn, params):
     """从旧版本（v1.5.x）备份导入数据。
 
@@ -1130,6 +1273,7 @@ ACTIONS = {
     "deploy_install": deploy_install,
     "deploy_restart": deploy_restart,
     "save_ui_state": save_ui_state,
+    "analyze_chat": analyze_chat,
     "backup_engine": backup_engine,
     "inspect_engine": inspect_engine,
     "restore_engine": restore_engine,

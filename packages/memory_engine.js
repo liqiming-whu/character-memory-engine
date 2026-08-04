@@ -75,6 +75,11 @@ METADATA
         { "name": "save_ui_state", "description": { "zh": "保存界面状态", "en": "Save UI state" }, "parameters": [
             { "name": "state_json", "type": "string", "required": true, "description": "界面状态JSON" }
         ]},
+        { "name": "analyze_chat", "description": { "zh": "AI 分析对话并提取结构化记忆", "en": "AI analyze chat and extract structured memory" }, "parameters": [
+            { "name": "chat_id", "type": "string", "required": false, "description": "对话ID；不传取最近对话" },
+            { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" },
+            { "name": "persona_name", "type": "string", "required": false, "description": "角色名" }
+        ]},
         { "name": "backup_engine", "description": { "zh": "导出引擎备份（SQLite+配置 ZIP）", "en": "Export engine backup (SQLite + config ZIP)" }, "parameters": [
             { "name": "reason", "type": "string", "required": false, "description": "备份原因" }
         ]},
@@ -162,3 +167,74 @@ exports.backup_engine = makeTool("backup_engine");
 exports.inspect_engine = makeTool("inspect_engine");
 exports.restore_engine = makeTool("restore_engine");
 exports.ping_worker = makeTool("ping_worker");
+
+// ===== analyze_chat：取对话 + 读 LLM 配置 + worker 分析 =====
+async function analyzeChat(params) {
+    try {
+        var chatId = (params && params.chat_id) || '';
+        // 未指定对话时，取最近对话
+        if (!chatId) {
+            try {
+                var chatList = await Tools.Chat.listChats({ sort_by: 'updatedAt', sort_order: 'desc', limit: 1 });
+                if (chatList && chatList.chats && chatList.chats.length > 0) {
+                    chatId = chatList.chats[0].id;
+                }
+            } catch (e) {}
+        }
+        if (!chatId) {
+            complete({ success: false, message: '没有找到对话' });
+            return;
+        }
+        // 取对话消息
+        var messages = [];
+        try {
+            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc' });
+            if (msgResult && msgResult.messages) messages = msgResult.messages;
+        } catch (e) {}
+        if (messages.length === 0) {
+            complete({ success: false, message: '对话内容为空' });
+            return;
+        }
+        // 拼 chat_text（过滤附件）
+        var lines = [];
+        for (var mi = 0; mi < messages.length; mi++) {
+            var m = messages[mi];
+            var c = (m.content || '').replace(/<attachment[^>]*>[\s\S]*?<\/attachment>/g, '').trim();
+            if (!c) continue;
+            if (c.length > 500) c = c.substring(0, 500) + '...';
+            var role = (m.sender === 'user' || m.sender === 'USER') ? '用户' : 'AI';
+            lines.push(role + ': ' + c);
+        }
+        var chat_text = lines.join('\n');
+        if (chat_text.length < 10) {
+            complete({ success: false, message: '对话内容过短' });
+            return;
+        }
+        // 读 LLM 配置（沿用旧 env）
+        var rawEndpoint = '';
+        try { rawEndpoint = getEnv('MEMORY_SYSTEM_ENDPOINT') || ''; } catch (e) {}
+        var endpoint = rawEndpoint.replace(/\/+$/, '');
+        if (endpoint.indexOf('/chat/completions') < 0) endpoint = endpoint + '/chat/completions';
+        var apiKey = '';
+        try { apiKey = getEnv('MEMORY_SYSTEM_KEY') || ''; } catch (e) {}
+        var model = '';
+        try { model = getEnv('MEMORY_SYSTEM_MODEL') || 'gpt-4o-mini'; } catch (e) {}
+        if (!endpoint || !apiKey) {
+            complete({ success: false, message: '未配置 API Endpoint 或 Key（请在设置中配置 MEMORY_SYSTEM_*）' });
+            return;
+        }
+        // 传给 worker 分析
+        var result = await callEngine('analyze_chat', {
+            chat_text: chat_text,
+            endpoint: endpoint,
+            api_key: apiKey,
+            model: model,
+            character_id: (params && params.character_id) || undefined,
+            persona_name: (params && params.persona_name) || ''
+        });
+        complete(result);
+    } catch (e) {
+        complete({ success: false, message: '分析异常: ' + (e.message || String(e)) });
+    }
+}
+exports.analyze_chat = analyzeChat;
