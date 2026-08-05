@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "2.0.20"
+VERSION = "2.0.25"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -1006,8 +1006,9 @@ def deploy_status(conn, params):
 def deploy_install(conn, params):
     """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）。
 
-    Operit Ubuntu 是 externally-managed（PEP 668），直接 pip install 会被拒，
-    需加 --break-system-packages；且用 venv python 时依赖装到 venv。
+    - 当前 python 若是 3.12（Termux TUR 或 proot venv），pip 可直接装。
+    - onnxruntime 仅完整支持 Python 3.12；Termux 默认 python 太新（3.13/3.14）装不上，
+      需先装 TUR 的 python3.12：pkg install python3.12（termux-user-repository 源）。
     """
     import subprocess
     missing = []
@@ -1019,19 +1020,29 @@ def deploy_install(conn, params):
         missing.append("tokenizers")
     if not missing:
         return {"success": True, "installed": [], "message": "依赖已齐全"}
-    # --break-system-packages 绕过 PEP 668；真机 venv（/root/.venv）通常无此限制但加上无害
+
+    py_major_minor = "%d.%d" % sys.version_info[:2]
+    setup_hint = ""
+    if py_major_minor != "3.12":
+        setup_hint = (
+            "\n\n当前 Python 是 %s，onnxruntime 仅完整支持 3.12。"
+            "若在 Termux，请先安装 python3.12（termux-user-repository 源）：\n"
+            "  pkg install python3.12\n"
+            "然后用 python3.12 -m pip 重试，或用 proot venv（/root/.venv/bin/python3.12）。" % py_major_minor
+        )
+
     cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade"] + missing
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
         if r.returncode != 0:
-            return {"success": False, "message": "安装失败: " + (r.stderr or r.stdout or "")[-500:]}
+            return {"success": False, "message": "安装失败: " + (r.stderr or r.stdout or "")[-500:] + setup_hint}
         # 二次确认实际装成功
         still_missing = [m for m in missing if not _check_module(m.replace("-", "_"))]
         if still_missing:
-            return {"success": False, "message": "部分依赖仍未安装: " + ", ".join(still_missing)}
+            return {"success": False, "message": "部分依赖仍未安装: " + ", ".join(still_missing) + setup_hint}
         return {"success": True, "installed": missing, "message": "已安装: " + ", ".join(missing)}
     except Exception as e:
-        return {"success": False, "message": "安装失败: " + str(e)}
+        return {"success": False, "message": "安装失败: " + str(e) + setup_hint}
 
 
 def deploy_restart(conn, params):
@@ -1646,9 +1657,37 @@ def main():
             print(MARKER + json.dumps({"success": False, "message": "cli error: " + str(e)}, ensure_ascii=False), flush=True)
         return
 
-    Path(args.db).parent.mkdir(parents=True, exist_ok=True)
-    init_db(args.db)
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    try:
+        Path(args.db).parent.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        tb = " | ".join(line.strip() for line in traceback.format_exc().splitlines() if line.strip())
+        msg = "worker db 目录创建失败: %s | %s" % (str(e), tb)
+        try:
+            log("ERROR", msg)
+        except Exception:
+            sys.stderr.write(msg + "\n")
+        return
+    try:
+        init_db(args.db)
+    except Exception as e:
+        # 启动失败必须留痕：写日志 + stderr，否则看不出 worker 为什么起不来
+        tb = " | ".join(line.strip() for line in traceback.format_exc().splitlines() if line.strip())
+        msg = "worker init_db 失败: %s | %s" % (str(e), tb)
+        try:
+            log("ERROR", msg)
+        except Exception:
+            sys.stderr.write(msg + "\n")
+        return
+    try:
+        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    except Exception as e:
+        tb = " | ".join(line.strip() for line in traceback.format_exc().splitlines() if line.strip())
+        msg = "worker 端口绑定失败（可能已被占用）: %s | %s" % (str(e), tb)
+        try:
+            log("ERROR", msg)
+        except Exception:
+            sys.stderr.write(msg + "\n")
+        return
     server.db_path = args.db
     log("INFO", "worker v%s listening on %s, db=%s" % (VERSION, args.port, args.db))
     try:

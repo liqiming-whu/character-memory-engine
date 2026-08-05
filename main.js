@@ -188,8 +188,9 @@ async function detectPython() {
   ];
   for (var i = 0; i < candidates.length; i++) {
     try {
-      var r = await execTerminal("ls -la " + candidates[i] + " 2>/dev/null || true", 8000);
-      if (String(r).indexOf('python3') >= 0) return candidates[i];
+      // 显式标记输出：ls 的 stderr（含路径名）会被 grabOut 兜回导致误判，只认 PY_OK
+      var r = await execTerminal("if [ -x " + candidates[i] + " ]; then echo PY_OK; else echo PY_NO; fi", 8000);
+      if (String(r).indexOf('PY_OK') >= 0) return candidates[i];
     } catch (e) {}
   }
   return '';

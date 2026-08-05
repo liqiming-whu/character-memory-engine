@@ -98,7 +98,7 @@ METADATA
         ]},
         { "name": "ping_worker", "description": { "zh": "检查 worker 是否可用", "en": "Check worker availability" }, "parameters": []},
         { "name": "get_logs", "description": { "zh": "读取日志文件尾部", "en": "Read log tail" }, "parameters": [
-            { "name": "limit", "type": "integer", "required": false, "description": "返回行数，默认 200" },
+            { "name": "limit", "type": "integer", "required": false, "description": "返回行数，默认 300（UI 加载 300，页面渲染显示最近 100）" },
             { "name": "level", "type": "string", "required": false, "description": "级别过滤：ERROR/WARN/INFO/DEBUG" },
             { "name": "path", "type": "string", "required": false, "description": "日志文件路径（默认 engine.log）" }
         ]},
@@ -295,10 +295,10 @@ async function detectPython() {
   ];
   for (var i = 0; i < candidates.length; i++) {
     try {
-      // 直接 ls 文件是否存在（比 test -x 更少依赖 shell 行为差异）
-      var probe = "ls -la " + candidates[i] + " 2>/dev/null || true";
+      // 显式标记输出：ls 的 stderr（含路径名）会被 grabOut 兜回导致误判，只认 PY_OK
+      var probe = "if [ -x " + candidates[i] + " ]; then echo PY_OK; else echo PY_NO; fi";
       var r = await withTimeout(execSh(probe), 8000, 'python 探测超时。');
-      if (String(r).indexOf('python3') >= 0) return candidates[i];
+      if (String(r).indexOf('PY_OK') >= 0) return candidates[i];
     } catch (e) {}
   }
   return '';
@@ -502,25 +502,20 @@ async function diagEngine(params) {
             out.env.py = String(pyCheck && (pyCheck.stdout || pyCheck.output || pyCheck) || '').trim();
         } catch (e) { out.messages.push('环境探测失败: ' + (e.message || String(e))); }
 
-        // 1) 检查 worker 进程（pgrep）
+        // 1) 检查 worker 进程（/proc 遍历，pgrep 在 proot 不存在）
         try {
             var pg = await withTimeout(
-                hiddenExecSafe("pgrep -f worker.py || true", 5000),
-                7000, 'pgrep 超时。'
+                hiddenExecSafe("F=''; for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) F=\"$F $(basename $p)\";; esac; fi; done; echo $F", 6000),
+                8000, '进程扫描超时。'
             );
             var pgs = String(pg && (pg.stdout || pg.output || pg) || '').trim();
             if (pgs) {
                 out.process_count = pgs.split(/\s+/).filter(Boolean).length;
                 out.pids = pgs.split(/\s+/).filter(Boolean);
             }
-        } catch (e) { out.messages.push('pgrep 失败: ' + (e.message || String(e))); }
+        } catch (e) { out.messages.push('进程扫描失败: ' + (e.message || String(e))); }
 
-        // 2) 读 worker 启动日志（/tmp/engine_worker.log 尾部）
-        try {
-            var tr = await withTimeout(Tools.Files.read('/tmp/engine_worker.log'), 5000, '读启动日志超时。');
-            var txt = tr && (tr.content || tr.text || '') || '';
-            out.tmp_log_tail = String(txt).split('\n').slice(-15).join('\n');
-        } catch (e) { out.messages.push('读 /tmp/engine_worker.log 失败: ' + (e.message || String(e))); }
+        // 2) 读 worker 启动日志（旧 CLI 架构路径已废弃；HTTP 常驻架构日志在 engine.log，见步骤 3）
 
         // 3) 读 engine.log（worker 自身日志，若有）
         try {
