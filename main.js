@@ -352,7 +352,8 @@ async function onPromptFinalize(input) {
 }
 
 // 应用创建时尝试拉起常驻 worker（HTTP 架构：worker 常驻，首次调用即通）
-// 延迟 30 秒：Operit 重启后 terminal/proot 子系统需时间初始化，过早调用会创建坏会话导致后续永久卡
+// 延迟 30 秒：实测 Operit 重启早期（数秒内）调用 hiddenExec 有 executor 会话竞态风险，
+// 可能创建坏会话导致后续永久卡；30s 是保守兜底值（并非 Ubuntu 实际需要初始化这么久）
 function onAppCreate() {
     try {
         setTimeout(function () {

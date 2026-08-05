@@ -33,7 +33,7 @@
 - **Operit 每次工具调用会重新加载 JS 模块**：模块级变量不保留 → 会话 key 必须用常量，不能用模块变量（曾因此每轮新建会话导致 proot 实例爆炸、Operit 闪退）
 - **推荐策略（v2.0.17）**：固定 key 常量（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时（与调用方超时对齐；超时直接报错、不建新会话）；会话真被污染时重启 Operit 即恢复
 - **⚠️ 禁用 default 会话**：不传 executorKey 走 `default` 会话。default 被多个包共享，一旦被某包卡死命令污染 → 所有走 default 的命令都阻塞（探测时好时坏、命令假死都是这个症状）。必须用**自定义固定 key**（本项目用 `cme`）
-- **⚠️ Operit 重启初期 Ubuntu 子系统未就绪（v2.0.20）**：重启后 terminal/proot 子系统需时间初始化（约 30s），**过早调用 hiddenExec 会创建坏会话**，后续所有调用永久卡 → 转圈 → ANR 闪退。`onAppCreate` 必须 `setTimeout(..., 30000)` 延迟拉起；`ensureWorkerUp` 每次强制 `freshKey` 全新会话（坏会话绝不复用，自愈不依赖 Operit 重启）。症状：重启后立即卡死/闪退——先怀疑启动初期调用
+- **⚠️ Operit 重启早期 hiddenExec 会话竞态（v2.0.20）**：实测 Operit 重启后**数秒内**调用 hiddenExec 可能触发 executor 会话竞态，创建坏会话 → 后续所有调用永久卡 → 转圈 → ANR 闪退；`onAppCreate` 延迟 30s 是**保守兜底**（并非 Ubuntu 实际需要初始化这么久，数秒后即可正常拉起）。`ensureWorkerUp` 每次强制 `freshKey` 全新会话（坏会话绝不复用，自愈不依赖 Operit 重启）。症状：重启后立即卡死/闪退——先怀疑启动初期调用
 - **返回值解析**：hiddenExec 返回结构不稳定（string / stdout / data 对象均可能出现）→ 解析需覆盖 `stdout/output/body/result/text/data`，最后 `JSON.stringify` 兜底（曾因缺 data 处理导致 python 探测时好时坏）
 ### 4.5 bash 拼接大坑（`&;` 语法错误）
 - 脚本用 `.join('; ')` 拼接时，若某元素以 `&` 结尾、下一元素独立 → 生成 `... &; echo ...` → **bash 语法错误（rc=2），整个 eval 直接失败**，后台命令从未执行、无任何报错痕迹
