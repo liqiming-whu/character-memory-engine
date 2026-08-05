@@ -103,6 +103,9 @@ METADATA
             { "name": "path", "type": "string", "required": false, "description": "日志文件路径（默认 engine.log）" }
         ]},
         { "name": "diag_engine", "description": { "zh": "插件侧诊断（不经 worker）：进程/启动日志/engine.log", "en": "Diagnose engine without worker" }, "parameters": []},
+        { "name": "log_ui", "description": { "zh": "前端诊断日志写文件（不经 worker）", "en": "Frontend diag log to file" }, "parameters": [
+            { "name": "line", "type": "string", "required": true, "description": "日志行内容" }
+        ]},
         { "name": "trigger_analysis", "description": { "zh": "触发 AI 分析对话并提取结构化记忆", "en": "Trigger AI analyze chat" }, "parameters": [
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
@@ -562,6 +565,27 @@ async function diagEngine(params) {
     }
 }
 exports.diag_engine = diagEngine;
+
+// ===== log_ui：前端诊断日志写文件（不经 worker，worker 未启动也能写）=====
+// 供 screen.js 的 dbgUi 埋点调用，追加到 dbg_ui.log。
+function logUi(params) {
+  try {
+    var line = String(params && (params.line || params.message) || '');
+    var DBG = '/sdcard/Download/Operit/character_memory_engine/logs/dbg_ui.log';
+    try { Tools.Files.write(DBG, line, true, 'android'); }
+    catch (e) {
+      try {
+        var old = Tools.Files.read(DBG);
+        var oldText = (old && (old.content || old.text)) || '';
+        Tools.Files.write(DBG, oldText + line, false, 'android');
+      } catch (e2) {}
+    }
+    return finish({ success: true });
+  } catch (e) {
+    return finish({ success: false, message: e && e.message ? e.message : String(e) });
+  }
+}
+exports.log_ui = logUi;
 
 // ===== deploy_*：通过 worker CLI 一次性调用 =====
 function deployStatus(params) {

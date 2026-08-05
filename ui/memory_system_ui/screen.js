@@ -288,7 +288,7 @@ loadingChatsState[1](false);
   // ===== 动作函数 =====
   // ===== 诊断探针：区分空加载类型（A=数据没返回 / B=返回但UI没更新 / C=初始化没执行）=====
   var _dbgTs = 0;
-  // 环形缓冲写 env DBG_UI_CACHE（最多保留 40 行），deploy tab 诊断可读
+  // 写 dbg_ui.log（经 log_ui 工具，不经 worker）+ env 环形缓冲兜底
   function dbgUi(tag, info) {
     try {
       var now = Date.now();
@@ -296,12 +296,17 @@ loadingChatsState[1](false);
       _dbgTs = now;
       var line = new Date(now).toISOString().replace('T', ' ').slice(5, 19) +
         ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
+      // 写文件（fire-and-forget，log_ui 不经 worker）
+      try {
+        ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {});
+      } catch (e) {}
+      // env 环形缓冲兜底（最多 40 行，deploy 诊断可读）
       var old = '';
-      try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e) {}
+      try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e2) {}
       var buf = old + line;
       var lines = buf.split('\n');
       if (lines.length > 40) lines = lines.slice(lines.length - 40);
-      try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e) {}
+      try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e3) {}
     } catch (e) {}
   }
 
