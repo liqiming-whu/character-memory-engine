@@ -192,34 +192,149 @@ async function httpCall(action, payload) {
   return { success: false, message: 'worker 返回无法解析: HTTP ' + (resp && resp.statusCode) + ' ' + text.slice(0, 200) };
 }
 
-// 尝试拉起常驻 worker（幂等：已在线则跳过）
+// 部署 worker.py / embed.py / models 到 DATA_DIR（用 dual-life-hub 验证的 readResource 签名）。
+// readResource JS 签名是 (key, outputFileName, internal)，自动解析当前 toolpkg。
+async function deployWorkerToData() {
+  try {
+    await withTimeout(Tools.Files.mkdir(DATA_DIR, true, 'android'), 8000, '创建数据目录超时。');
+    await withTimeout(Tools.Files.mkdir(DATA_DIR + '/models', true, 'android'), 8000, '创建 models 目录超时。');
+    // worker.py
+    try {
+      var wSrc = await ToolPkg.readResource('engine_worker_py', 'worker.py', false);
+      if (wSrc) await Tools.Files.copy(String(wSrc), DATA_DIR + '/worker.py', false, 'android', 'linux');
+    } catch (e) {}
+    // embed.py
+    try {
+      var eSrc = await ToolPkg.readResource('engine_embed_py', 'embed.py', false);
+      if (eSrc) await Tools.Files.copy(String(eSrc), DATA_DIR + '/embed.py', false, 'android', 'linux');
+    } catch (e) {}
+    // models
+    var modelFiles = [
+      ['engine_model_config', 'config.json'],
+      ['engine_model_onnx', 'model_int8.onnx'],
+      ['engine_model_tokenizer', 'tokenizer.json']
+    ];
+    for (var mi = 0; mi < modelFiles.length; mi++) {
+      try {
+        var mSrc = await ToolPkg.readResource(modelFiles[mi][0], modelFiles[mi][1], false);
+        if (mSrc) await Tools.Files.copy(String(mSrc), DATA_DIR + '/models/' + modelFiles[mi][1], false, 'android', 'linux');
+      } catch (e) {}
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 尝试拉起常驻 worker（幂等：已在线则跳过）。
+// python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
 async function ensureWorkerUp() {
   var ping = await httpCall('ping_worker', {});
   if (ping && ping.success) return { success: true, alreadyUp: true };
+  // 先确保 worker.py 等在 DATA_DIR
+  try { await deployWorkerToData(); } catch (e) {}
   var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+
+  var pyCmd = await detectPython();
+  if (!pyCmd) {
+    return { success: false, message: '未找到可用的 python3。请手动执行：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  }
+
+  // 复制全部 python 文件 + models 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
+  var ROOT_DIR = '/root/character_memory_engine';
+  // 无条件杀掉旧 worker 再启动（pgrep 守护不可靠：僵尸/死进程匹配会阻止重启）
   var script = [
-    "mkdir -p " + DATA_DIR + "/logs",
-    "pgrep -f 'worker.py --port' >/dev/null 2>&1 || (",
-    "  nohup /root/.venv/bin/python3.12 " + DATA_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 &",
-    "  echo started",
-    ") || echo already-running"
+    "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
+    "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
+    "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
+    "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
+    "for p in $(pgrep -f 'worker.py --port' 2>/dev/null); do kill $p 2>/dev/null; done; sleep 1",
+    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (typeof terminal.hiddenExec === 'function') {
-      await withTimeout(terminal.hiddenExec('bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", { executorKey: 'character_memory_engine', timeoutMs: 20000 }), 25000, '拉起 worker 超时。');
+      // 探针验证 hiddenExec 直接执行多语句命令可用，无需 bash -lc 包装
+      await withTimeout(hiddenExecSafe(script, 30000), 35000, '拉起 worker 超时。');
     } else {
       var sess = await withTimeout(terminal.create('memory_engine_start'), 8000, '创建终端会话超时。');
-      await withTimeout(terminal.exec(sess.sessionId, 'bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", 20000), 25000, '拉起 worker 超时。');
+      await withTimeout(terminal.exec(sess.sessionId, script, 30000), 35000, '拉起 worker 超时。');
       try { await terminal.close(sess.sessionId); } catch (e) {}
     }
   } catch (e) {
-    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
   }
   await new Promise(function (r) { setTimeout(r, 3000); });
   var ping2 = await httpCall('ping_worker', {});
-  if (ping2 && ping2.success) return { success: true, started: true };
-  return { success: false, message: '拉起后 worker 仍未响应。请手动执行：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+}
+
+// 探测可用 python3：优先 proot venv（完整向量），备选系统 python3。
+// 用 shell 判断文件存在且可执行（不依赖 bash -lc 包装的 test -x 输出解析，
+// 直接 ls 判断路径存在）
+async function detectPython() {
+  var candidates = [
+    '/root/.venv/bin/python3.12',
+    '/root/.venv/bin/python3',
+    '/usr/bin/python3',
+    'python3'
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      // 直接 ls 文件是否存在（比 test -x 更少依赖 shell 行为差异）
+      var probe = "ls -la " + candidates[i] + " 2>/dev/null || true";
+      var r = await withTimeout(execSh(probe), 8000, 'python 探测超时。');
+      if (String(r).indexOf('python3') >= 0) return candidates[i];
+    } catch (e) {}
+  }
+  return '';
+}
+
+// hiddenExec 会话策略（v1.0.6+日志实证）：
+// 1. 会话按 executorKey 持久复用（proot+bash），卡死命令会锁死会话；Operit 每次调用会重新加载模块（变量不保留）
+// 2. 方案：常量固定 key 'cme'（永远只复用 1 个会话，绝不膨胀）+ Promise.race 硬超时（超时直接报错，不建新会话）
+// 3. 命令全部是快速返回型（setsid 后台 + echo），不会污染会话；真被污染时重启 Operit 即恢复
+var CME_KEY = 'cme';
+function withRace(p, ms, msg) {
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var timer = setTimeout(function () { if (!done) { done = true; reject(new Error(msg || 'timeout')); } }, ms);
+    Promise.resolve(p).then(function (v) { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+      function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+  });
+}
+async function hiddenExecSafe(cmd, timeoutMs) {
+  return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: CME_KEY }), timeoutMs, 'hiddenExec 超时');
+}
+function grabOut(r) {
+  if (typeof r === 'string') return r;
+  if (!r) return '';
+  if (r.stdout) return r.stdout;
+  if (r.output) return r.output;
+  if (r.body) return r.body;
+  if (r.result) return r.result;
+  if (r.text) return r.text;
+  if (r.data !== undefined) {
+    if (typeof r.data === 'string') return r.data;
+    try { return JSON.stringify(r.data); } catch (e) { return String(r.data); }
+  }
+  try { return JSON.stringify(r); } catch (e) { return String(r); }
+}
+// 执行 shell 并返回输出。
+// 与探针一致：直接传命令给 hiddenExec（不包 bash -lc，探针验证这样能正常返回输出）
+async function execSh(cmd) {
+  var terminal = Tools.System && Tools.System.terminal;
+  if (!terminal) return '';
+  try {
+    if (typeof terminal.hiddenExec === 'function') {
+      return grabOut(await hiddenExecSafe(cmd, 10000));
+    }
+    var sess = await terminal.create('cme_sh');
+    var rr = await terminal.exec(sess.sessionId, cmd, 10000);
+    try { await terminal.close(sess.sessionId); } catch (e) {}
+    return grabOut(rr);
+  } catch (e) { return ''; }
 }
 
 // 工具调用入口：HTTP 直调；失败时尝试拉起 worker 一次再重试
@@ -348,13 +463,26 @@ exports.analyze_chat = analyzeChat;
 // ===== diag_engine：插件侧诊断（不经 worker，worker 未运行时也能用）=====
 // 解决死锁：worker 起不来时部署页无法通过 worker 查状态/看日志。
 // 这里直接用 Tools.System.terminal + Tools.Files 读启动日志/进程/engine.log。
+// 注意：所有异步调用都必须 withTimeout 保护，否则 hiddenExec 卡住会让整个诊断挂起。
 async function diagEngine(params) {
     try {
-        var out = { worker_up: false, tmp_log_tail: '', engine_log_tail: '', process_count: 0, pids: [], messages: [] };
+        var out = { worker_up: false, tmp_log_tail: '', engine_log_tail: '', process_count: 0, pids: [], messages: [], env: {} };
+
+        // 0) 探测 hiddenExec 环境（python 可用性、proot 环境）
+        try {
+            var pyCheck = await withTimeout(
+                hiddenExecSafe("command -v python3; echo '---'; python3 --version 2>&1; echo '---'; command -v python3.12; echo '---'; ls /root/.venv/bin/python3.12 2>&1; echo '---'; echo 'whoami='$(whoami)", 8000),
+                10000, '环境探测超时。'
+            );
+            out.env.py = String(pyCheck && (pyCheck.stdout || pyCheck.output || pyCheck) || '').trim();
+        } catch (e) { out.messages.push('环境探测失败: ' + (e.message || String(e))); }
 
         // 1) 检查 worker 进程（pgrep）
         try {
-            var pg = await Tools.System.terminal.hiddenExec("pgrep -f worker.py || true", { timeoutMs: 5000 });
+            var pg = await withTimeout(
+                hiddenExecSafe("pgrep -f worker.py || true", 5000),
+                7000, 'pgrep 超时。'
+            );
             var pgs = String(pg && (pg.stdout || pg.output || pg) || '').trim();
             if (pgs) {
                 out.process_count = pgs.split(/\s+/).filter(Boolean).length;
@@ -364,14 +492,14 @@ async function diagEngine(params) {
 
         // 2) 读 worker 启动日志（/tmp/engine_worker.log 尾部）
         try {
-            var tr = await Tools.Files.read('/tmp/engine_worker.log');
+            var tr = await withTimeout(Tools.Files.read('/tmp/engine_worker.log'), 5000, '读启动日志超时。');
             var txt = tr && (tr.content || tr.text || '') || '';
             out.tmp_log_tail = String(txt).split('\n').slice(-15).join('\n');
         } catch (e) { out.messages.push('读 /tmp/engine_worker.log 失败: ' + (e.message || String(e))); }
 
         // 3) 读 engine.log（worker 自身日志，若有）
         try {
-            var el = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/logs/engine.log');
+            var el = await withTimeout(Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/logs/engine.log'), 5000, '读 engine.log 超时。');
             var etxt = el && (el.content || el.text || '') || '';
             out.engine_log_tail = String(etxt).split('\n').slice(-15).join('\n');
         } catch (e) { /* engine.log 可能尚未生成 */ }

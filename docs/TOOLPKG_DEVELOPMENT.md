@@ -27,18 +27,23 @@
 - 稳妥写法：`try { complete(result); } catch(e) {} return result;`（双保险）
 - `normalizeComposeResult` 只处理 `{composeDsl:{screen:...}}` 特殊结构，普通结果原样透传
 
-### 4. 终端环境限制（关键）
-- Operit 内置 `Tools.System.terminal` 跑在 **Android 原生 shell**：无 python3、无 /root、无法直接访问 proot rootfs
-- 手动拼 `proot` 命令在 untrusted_app 下会报 "foreign binary"（SELinux 拦 /proc 架构探测）
-- **自动拉起 worker 的正解是 Termux**：`/data/data/com.termux/files/usr/bin/python3`（Android 原生可执行）
-- 未装 Termux 时：proot 会话（super_admin terminal）手动拉起
+### 4. hiddenExec 终端环境与执行模型（v1.0.6 探针实证）
+- `Tools.System.terminal.hiddenExec` 跑在 **Operit 内置 proot Ubuntu（root）**：`/usr/bin/python3`（3.12.3）与 `/root/.venv/bin/python3.12` 均可用；`ps`/`pgrep` 不存在（procps 未装）→ 进程检测一律用 `/proc` 遍历
+- **会话按 executorKey 持久复用**（proot + bash，`eval "$COMMAND_TO_EXEC"` 执行）：卡死命令会永久锁死该会话，后续同 key 命令排队等待；`timeoutMs` 对排队无效（命令尚未开始执行）
+- **Operit 每次工具调用会重新加载 JS 模块**：模块级变量不保留 → 会话 key 必须用常量，不能用模块变量（曾因此每轮新建会话导致 proot 实例爆炸、Operit 闪退）
+- **推荐策略（v2.0.17）**：固定 key 常量（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时（与调用方超时对齐；超时直接报错、不建新会话）；会话真被污染时重启 Operit 即恢复
+- **返回值解析**：hiddenExec 返回结构不稳定（string / stdout / data 对象均可能出现）→ 解析需覆盖 `stdout/output/body/result/text/data`，最后 `JSON.stringify` 兜底（曾因缺 data 处理导致 python 探测时好时坏）
+### 4.5 bash 拼接大坑（`&;` 语法错误）
+- 脚本用 `.join('; ')` 拼接时，若某元素以 `&` 结尾、下一元素独立 → 生成 `... &; echo ...` → **bash 语法错误（rc=2），整个 eval 直接失败**，后台命令从未执行、无任何报错痕迹
+- 正确写法：后台命令与后续命令合并为同一数组元素：`"setsid " + pyCmd + " ... < /dev/null & echo started"`
+- 症状参考：ensureWorkerUp 返回"拉起后 worker 仍未响应"且 engine.log 无任何新记录——先怀疑这类拼接错误
 
 ### 5. 调试广播（重装/刷新不用重启 Operit）
 ```bash
 # 安装/覆盖指定包
 am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG \
   --es package_name com.operit.character_memory_engine \
-  --es file_path /storage/emulated/0/Android/data/com.ai.assistance.operit/files/packages/com-operit-character-memory-engine-v2.0.3.toolpkg \
+  --es file_path /storage/emulated/0/Android/data/com.ai.assistance.operit/files/packages/com-operit-character-memory-engine-v2.0.17.toolpkg \
   --ez reset_subpackage_states false
 
 # 刷新 packages（只重扫，不保证重装已缓存包）

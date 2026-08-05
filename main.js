@@ -35,14 +35,40 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
+// hiddenExec 会话策略（v1.0.6+日志实证）：
+// 1. 会话按 executorKey 持久复用（proot+bash），卡死命令会锁死会话；Operit 每次调用会重新加载模块（变量不保留）
+// 2. 方案：常量固定 key 'cme'（永远只复用 1 个会话，绝不膨胀）+ Promise.race 硬超时（超时直接报错，不建新会话）
+// 3. 命令全部是快速返回型（setsid 后台 + echo），不会污染会话；真被污染时重启 Operit 即恢复
+var CME_KEY = 'cme';
+function withRace(p, ms, msg) {
+  return new Promise(function (resolve, reject) {
+    var done = false;
+    var timer = setTimeout(function () { if (!done) { done = true; reject(new Error(msg || 'timeout')); } }, ms);
+    Promise.resolve(p).then(function (v) { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
+      function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
+  });
+}
+async function hiddenExecSafe(cmd, timeoutMs) {
+  return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: CME_KEY }), timeoutMs, 'hiddenExec 超时');
+}
+function grabOut(r) {
+  if (typeof r === 'string') return r;
+  if (!r) return '';
+  if (r.stdout) return r.stdout;
+  if (r.output) return r.output;
+  if (r.body) return r.body;
+  if (r.result) return r.result;
+  if (r.text) return r.text;
+  if (r.data !== undefined) {
+    if (typeof r.data === 'string') return r.data;
+    try { return JSON.stringify(r.data); } catch (e) { return String(r.data); }
+  }
+  try { return JSON.stringify(r); } catch (e) { return String(r); }
+}
 async function execTerminal(cmd, timeoutMs) {
     try {
-        var r = await Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs || 15000 });
-        var s = '';
-        if (typeof r === 'string') s = r;
-        else if (r && (r.stdout || r.output)) s = r.stdout || r.output;
-        else if (r && r.body) s = r.body;
-        return String(s || '');
+        var r = await hiddenExecSafe(cmd, timeoutMs || 15000);
+        return grabOut(r);
     } catch (e) {
         try {
             var sess = await Tools.System.terminal.create('engine_start');
@@ -139,28 +165,87 @@ async function httpCall(action, payload) {
   }
 }
 
-// 尝试拉起常驻 worker（幂等）
+// 探测可用 python3：优先 proot venv（完整向量），备选系统 python3。
+// 用 ls 判断路径存在（比 test -x 更少依赖 shell 行为差异）
+async function detectPython() {
+  var candidates = [
+    '/root/.venv/bin/python3.12',
+    '/root/.venv/bin/python3',
+    '/usr/bin/python3',
+    'python3'
+  ];
+  for (var i = 0; i < candidates.length; i++) {
+    try {
+      var r = await execTerminal("ls -la " + candidates[i] + " 2>/dev/null || true", 8000);
+      if (String(r).indexOf('python3') >= 0) return candidates[i];
+    } catch (e) {}
+  }
+  return '';
+}
+
+// 部署 worker.py / embed.py / models 到 DATA_DIR（readResource 签名 (key, outputFileName, internal)）
+async function deployWorkerToData() {
+  try {
+    await Tools.Files.mkdir(DATA_DIR + '/models', true, 'android');
+    var pairs = [
+      ['engine_worker_py', 'worker.py'],
+      ['engine_embed_py', 'embed.py']
+    ];
+    for (var i = 0; i < pairs.length; i++) {
+      try {
+        var src = await ToolPkg.readResource(pairs[i][0], pairs[i][1], false);
+        if (src) await Tools.Files.copy(String(src), DATA_DIR + '/' + pairs[i][1], false, 'android', 'linux');
+      } catch (e) {}
+    }
+    var mf = [['engine_model_config','config.json'],['engine_model_onnx','model_int8.onnx'],['engine_model_tokenizer','tokenizer.json']];
+    for (var j = 0; j < mf.length; j++) {
+      try {
+        var ms = await ToolPkg.readResource(mf[j][0], mf[j][1], false);
+        if (ms) await Tools.Files.copy(String(ms), DATA_DIR + '/models/' + mf[j][1], false, 'android', 'linux');
+      } catch (e) {}
+    }
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 尝试拉起常驻 worker（幂等）。
+// 方案：worker.py/embed.py/models 复制到 /root/character_memory_engine（ext4 稳定），
+// 用 venv python 运行（完整向量），数据经 --db 落到 /sdcard（用户可访问）。
+// setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
 async function ensureWorkerUp() {
   var ping = await httpCall('ping_worker', {});
   if (ping && ping.success) return { success: true, alreadyUp: true };
+  // 先确保 worker.py 等在 DATA_DIR
+  try { await deployWorkerToData(); } catch (e) {}
+  var pyCmd = await detectPython();
+  if (!pyCmd) {
+    return { success: false, message: '未找到可用 python3，请手动启动：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  }
+  // 复制全部 python 文件 + models 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
+  var ROOT_DIR = '/root/character_memory_engine';
+  // 无条件杀掉旧 worker 再启动（pgrep 守护不可靠：僵尸/死进程匹配会阻止重启）
   var script = [
-    "mkdir -p " + DATA_DIR + "/logs",
-    "pgrep -f 'worker.py --port' >/dev/null 2>&1 || (",
-    "  nohup /root/.venv/bin/python3.12 " + DATA_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 &",
-    "  echo started",
-    ") || echo already-running"
+    "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
+    "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
+    "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
+    "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
+    "for p in $(pgrep -f 'worker.py --port' 2>/dev/null); do kill $p 2>/dev/null; done; sleep 1",
+    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (Tools.System && Tools.System.terminal && typeof Tools.System.terminal.hiddenExec === 'function') {
-      await Tools.System.terminal.hiddenExec('bash -lc ' + "'" + script.replace(/'/g, "'\\''") + "'", { executorKey: 'character_memory_engine', timeoutMs: 20000 });
+      // 探针验证 hiddenExec 直接执行多语句命令可用，无需 bash -lc 包装
+      await hiddenExecSafe(script, 30000);
     }
   } catch (e) {
     return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) };
   }
   await new Promise(function (r) { setTimeout(r, 3000); });
   var ping2 = await httpCall('ping_worker', {});
-  if (ping2 && ping2.success) return { success: true, started: true };
-  return { success: false, message: '拉起后 worker 仍未响应，请手动启动：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）

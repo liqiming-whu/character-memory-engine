@@ -45,7 +45,8 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
 ```
 
 ### 已知限制与运维
-- **Operit 重启后 Worker 需重新拉起**：Operit 内置终端是 Android 原生 shell（无 python3、无法访问 proot rootfs），`onAppCreate` 自动拉起依赖 Termux（`/data/data/com.termux/files/usr/bin/python3`）；未装 Termux 时需在 proot 会话手动拉起。
+- **自动拉起 Worker（v2.0.17+）**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离，重启后秒级就绪。
+- **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话，重启 Operit 即恢复。
 - **部署状态自检**：`deploy_status` 走 `/proc` 遍历（不依赖 pgrep，proot/Termux 通用）。
 - **调试广播**（需 `--user 0`）：
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
@@ -60,7 +61,7 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
 - BGE-small-zh int8（23.9MB，512 维）
 - 语义相似度：奶茶 vs 爱喝奶茶 = 0.95，奶茶 vs 健身房 = 0.47
 - 方案 A 8 项全 PASS、方案 B 22 项全 PASS、旧备份导入幂等 PASS
-
+- **自动拉起（v2.0.17）**：重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）
 详见 [docs/TECH_VALIDATION.md](docs/TECH_VALIDATION.md)。
 
 ## 项目结构
