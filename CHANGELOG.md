@@ -34,6 +34,10 @@
   - 现象：退出插件界面再进入时，角色页偶发"未识别到角色卡"或"正在读取"，其他 tab 偶发空白；过一会儿 / 切 tab / 重进可恢复
   - 疑似 Operit 平台层：useState/useRef 跨重启持久化、onLoad 异步竞态、相同值 setState 不触发重渲染、工具调用调度层开销
   - 已做缓解（共享缓存 / 时间戳守卫 / 占位 / 自动重试），残余问题暂不深挖
+- [ ] 前端状态管理重构（外部审查建议，P6 方案参考）：
+  - 已归档两份外部审查：`docs/Character_Memory_Frontend_Source_Review.md`（生命周期/竞态/多状态源分析）与 `docs/Character_Memory_Engine_review_notes.md`（架构评价与优化优先级）
+  - 核心建议：统一状态管理（MemoryController 单一状态源，页面只做展示）、状态机化（INITIALIZING/WORKER_READY/LOADING/READY/EMPTY/ERROR）、区分 `null`（未加载）与 `[]`（已加载但为空）、延迟分析任务至空闲期、保留 executor 启动保护
+  - 结论：后端无性能瓶颈，问题集中在 Operit 启动生命周期适配与前端状态管理；不继续修改后端架构
 - 后续方向：**恶性 bug 与功能问题优先**
 
 ### 调试设施
