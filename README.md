@@ -45,8 +45,8 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
 ```
 
 ### 已知限制与运维
-- **自动拉起 Worker（v2.0.17+）**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离，重启后秒级就绪。
-- **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话，重启 Operit 即恢复。
+- **自动拉起 Worker（v2.0.20+）**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启初期 Ubuntu 子系统需约 30s 初始化**，`onAppCreate` 延迟 30s 后拉起；初始化完成后才秒级就绪，提前调用会创建坏会话导致卡死/闪退。
+- **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话；每次拉起强制 `freshKey` 全新会话，坏会话绝不复用。
 - **部署状态自检**：`deploy_status` 走 `/proc` 遍历（不依赖 pgrep，proot/Termux 通用）。
 - **调试广播**（需 `--user 0`）：
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
