@@ -35,11 +35,15 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
-// hiddenExec 会话策略（v1.0.6+日志实证）：
-// 1. 会话按 executorKey 持久复用（proot+bash），卡死命令会锁死会话；Operit 每次调用会重新加载模块（变量不保留）
-// 2. 方案：常量固定 key 'cme'（永远只复用 1 个会话，绝不膨胀）+ Promise.race 硬超时（超时直接报错，不建新会话）
-// 3. 命令全部是快速返回型（setsid 后台 + echo），不会污染会话；真被污染时重启 Operit 即恢复
-var CME_KEY = 'cme';
+// hiddenExec 会话策略（v1.0.6+多轮实测）：
+// 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
+// 2. 方案：key 持久化到文件（跨模块重载有效）+ 失败自动漂移新 key（自愈），正常时固定 1 个会话零膨胀
+var KEY_FILE = '/sdcard/Download/Operit/character_memory_engine/logs/exec_key';
+function getKey() {
+  try { var k = Tools.Files.read(KEY_FILE); var t = (k && (k.content || k.text)) || ''; return (t && t.length < 64) ? t : 'cme'; } catch (e) { return 'cme'; }
+}
+function saveKey(k) { try { Tools.Files.write(KEY_FILE, k, false, 'android'); } catch (e) {} }
+function freshKey() { var k = 'cme_' + Date.now(); saveKey(k); return k; }
 function withRace(p, ms, msg) {
   return new Promise(function (resolve, reject) {
     var done = false;
@@ -49,7 +53,15 @@ function withRace(p, ms, msg) {
   });
 }
 async function hiddenExecSafe(cmd, timeoutMs) {
-  return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: CME_KEY }), timeoutMs, 'hiddenExec 超时');
+  var key = getKey();
+  try {
+    return await withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: key }), timeoutMs, 'hiddenExec 超时');
+  } catch (e) {
+    // 会话疑似失效/被锁 → 漂移全新 key（文件持久化，跨模块重载保留），自愈重试一次
+    var nk = 'cme_' + Date.now();
+    saveKey(nk);
+    return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: nk }), timeoutMs, 'hiddenExec 二次超时');
+  }
 }
 function grabOut(r) {
   if (typeof r === 'string') return r;
@@ -215,6 +227,18 @@ async function deployWorkerToData() {
 // 用 venv python 运行（完整向量），数据经 --db 落到 /sdcard（用户可访问）。
 // setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
 async function ensureWorkerUp() {
+  // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
+  var LOCK = DATA_DIR + '/logs/launching.lock';
+  try {
+    var lk = Tools.Files.read(LOCK);
+    var lkText = (lk && (lk.content || lk.text)) || '';
+    var lkTs = parseInt(lkText, 10) || 0;
+    if (Date.now() - lkTs < 60000) {
+      return { success: false, message: 'worker 正在拉起中，请稍候再试。' };
+    }
+  } catch (e) {}
+  try { Tools.Files.write(LOCK, String(Date.now()), false, 'android'); } catch (e) {}
+  freshKey(); // 每次拉起强制全新会话：Operit 重启初期 terminal 未就绪会留下坏会话，绝不复用
   var ping = await httpCall('ping_worker', {});
   if (ping && ping.success) return { success: true, alreadyUp: true };
   // 先确保 worker.py 等在 DATA_DIR
@@ -231,7 +255,7 @@ async function ensureWorkerUp() {
     "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
     "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
     "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
-    "for p in $(pgrep -f 'worker.py --port' 2>/dev/null); do kill $p 2>/dev/null; done; sleep 1",
+    "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
     "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
@@ -244,6 +268,7 @@ async function ensureWorkerUp() {
   }
   await new Promise(function (r) { setTimeout(r, 3000); });
   var ping2 = await httpCall('ping_worker', {});
+  try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
   if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
   return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
 }
@@ -295,15 +320,18 @@ async function onPromptFinalize(input) {
 }
 
 // 应用创建时尝试拉起常驻 worker（HTTP 架构：worker 常驻，首次调用即通）
+// 延迟 30 秒：Operit 重启后 terminal/proot 子系统需时间初始化，过早调用会创建坏会话导致后续永久卡
 function onAppCreate() {
     try {
-        ensureWorkerUp().then(function (up) {
-            try { setEnv('MEMORY_ENGINE_WORKER_READY', (up && up.success) ? '1' : '0'); } catch (e) {}
-            if (!up || !up.success) jsLog('WARN', 'onAppCreate: worker 未就绪: ' + (up && up.message ? up.message : '未知原因'));
-        }).catch(function(e) {
-            jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
-            try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
-        });
+        setTimeout(function () {
+            ensureWorkerUp().then(function (up) {
+                try { setEnv('MEMORY_ENGINE_WORKER_READY', (up && up.success) ? '1' : '0'); } catch (e) {}
+                if (!up || !up.success) jsLog('WARN', 'onAppCreate: worker 未就绪: ' + (up && up.message ? up.message : '未知原因'));
+            }).catch(function (e) {
+                jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
+                try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
+            });
+        }, 30000);
     } catch (e) {}
     return { ok: true };
 }

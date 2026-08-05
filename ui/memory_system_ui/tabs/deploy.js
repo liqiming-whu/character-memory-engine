@@ -19,6 +19,7 @@ function render(ctx) {
   var diagState = ctx.useState('deploy_diag', null);
 
   async function checkStatus() {
+    if (busyState[0]) return; // 防连点：进行中直接忽略
     busyState[1](true);
     msgState[1]('检查部署状态...');
     try {
@@ -41,6 +42,7 @@ function render(ctx) {
 
   // 插件侧诊断：不经 worker，worker 未运行时也能看进程/启动日志/engine.log
   async function runDiagnosis() {
+    if (diagState[0] && diagState[0].running) return; // 防连点
     diagState[1]({ running: true });
     try {
       var raw = await ctx.callTool('memory_engine:diag_engine', {});
