@@ -118,8 +118,7 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
 var dbgRenderCount = (dbgRenderCount || 0) + 1;
   if (!initRef.current) {
  initRef.current = true;
- dbgUi('init', '首次渲染，触发分析');
- // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
+ dbgUi('init', '首次渲染，触发分析'); // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
  analyzingState[1](false);
  // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
  (async function() {
@@ -203,6 +202,15 @@ var dbgRenderCount = (dbgRenderCount || 0) + 1;
       loadKnowledgeMemories().finally(function() { memoryLoadScheduledRef.current = false; });
     }, 0);
   }
+
+  // ===== render 探针：记录本次渲染看到的数据快照 =====
+  try {
+    dbgUi('render', 'dataState=' + (dataState[0] ? (dataState[0].events.length + 'e/' + dataState[0].todos.length + 't/' + dataState[0].contacts.length + 'c/' + dataState[0].info.length + 'i/' + dataState[0].finance.length + 'f/' + dataState[0].menstrual.length + 'm') : 'null') +
+      ' | memoryState=' + (memoryState[0] ? memoryState[0].length : 'null') +
+      ' | persona=' + (screenPersonaState[0] ? screenPersonaState[0].id : 'null') +
+      ' | dataLoadedTs=' + (dataLoadedState[0] || 0) +
+      ' | tab=' + currentTab);
+  } catch (e) {}
 
   // ===== 角色页：进入时自动加载角色上下文与记忆（与知识页同款 setTimeout 模式）=====
   // 每次进入角色 tab 都重新加载，不因之前加载过而跳过；ref 仅防同帧重复。
@@ -296,11 +304,7 @@ loadingChatsState[1](false);
       _dbgTs = now;
       var line = new Date(now).toISOString().replace('T', ' ').slice(5, 19) +
         ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
-      // 写文件（fire-and-forget，log_ui 不经 worker）
-      try {
-        ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {});
-      } catch (e) {}
-      // env 环形缓冲兜底（最多 40 行，deploy 诊断可读）
+      try { ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {}); } catch (e) {}
       var old = '';
       try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e2) {}
       var buf = old + line;
@@ -309,22 +313,36 @@ loadingChatsState[1](false);
       try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e3) {}
     } catch (e) {}
   }
+  // state 写入探针：确认 setState 是否真的执行、值是什么
+  function dbgState(name, newVal, oldVal) {
+    try {
+      var nv = typeof newVal === 'object' && newVal ? (newVal.length !== undefined ? name + '.length=' + newVal.length : name + '=' + JSON.stringify(newVal).slice(0, 60)) : name + '=' + String(newVal).slice(0, 60);
+      var ov = typeof oldVal === 'object' && oldVal ? (oldVal.length !== undefined ? name + '.length=' + oldVal.length : name + '=' + JSON.stringify(oldVal).slice(0, 60)) : name + '=' + String(oldVal).slice(0, 60);
+      dbgUi('state', 'set ' + nv + ' | old ' + ov);
+    } catch (e) {}
+  }
+  // requestId：每次加载请求分配递增 id，返回时带 id，定位覆盖关系
+  var reqIdCounter = { data: 0, persona: 0, mem: 0 };
+  function nextReqId(kind) { reqIdCounter[kind] = (reqIdCounter[kind] || 0) + 1; return reqIdCounter[kind]; }
 
   async function loadData() {
-    dbgUi('loadData', '触发');
+    var rid = nextReqId('data');
+    dbgUi('loadData', 'req#' + rid + ' 触发');
     try {
       var raw = await ctx.callTool('memory_engine:load_life_data', {});
       var r = parseResult(raw);
-      dbgUi('loadData', '返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
+      dbgUi('loadData', 'req#' + rid + ' 返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
       if (r && r.success) {
-            dataState[1]({
+            var newData = {
                 events: r.extracted && r.extracted.events || [],
                 contacts: r.extracted && r.extracted.contacts || [],
                 info: r.extracted && r.extracted.info || [],
                 finance: r.extracted && r.extracted.finance || [],
                 todos: r.extracted && r.extracted.todos || [],
                 menstrual: r.extracted && r.extracted.menstrual || []
-            });
+            };
+            dbgState('dataState', newData, dataState[0]);
+            dataState[1](newData);
             if (r.injection) {
               // 竞态保护：用户刚保存过（3秒内），跳过 loadData 的旧值覆盖
               if (Date.now() - (lastInjectionSaveRef.current || 0) > 3000) {
@@ -357,16 +375,18 @@ loadingChatsState[1](false);
   }
 
   async function loadScreenPersona() {
-    dbgUi('loadPersona', '触发');
+    var rid = nextReqId('persona');
+    dbgUi('loadPersona', 'req#' + rid + ' 触发');
     // v2.1.0：60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
     var pC = personaCacheRef.current || {};
     if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
-      dbgUi('loadPersona', '缓存命中 id=' + pC.id);
+      dbgUi('loadPersona', 'req#' + rid + ' 缓存命中 id=' + pC.id);
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(pC.id || ''));
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(pC.name || ''));
       var curC = screenPersonaState[0];
       var npC = { id: String(pC.id || ''), name: String(pC.name || ''), type: String(pC.type || 'character_card') };
       if (!curC || curC.id !== npC.id || curC.name !== npC.name || curC.type !== npC.type) {
+        dbgState('screenPersonaState', npC, curC);
         screenPersonaState[1](npC);
       }
       return;
@@ -375,7 +395,7 @@ loadingChatsState[1](false);
       var pRaw = await ctx.callTool('memory_engine:list_characters', {});
       var pResult = parseResult(pRaw);
       var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
-      dbgUi('loadPersona', '返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
+      dbgUi('loadPersona', 'req#' + rid + ' 返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
       var p = chars.length > 0
         ? { id: String(chars[0].id || ''), name: String(chars[0].name || ''), type: 'character_card' }
         : { id: '', name: '', type: '' };
@@ -385,6 +405,7 @@ loadingChatsState[1](false);
       var curSP = screenPersonaState[0];
       var np = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') };
       if (!curSP || curSP.id !== np.id || curSP.name !== np.name || curSP.type !== np.type) {
+        dbgState('screenPersonaState', np, curSP);
         screenPersonaState[1](np);
       }
       // v2.1.0：不再主动查询角色记忆——避免每次切回都覆盖用户的分类选择；
@@ -394,7 +415,8 @@ loadingChatsState[1](false);
   }
 
   async function loadKnowledgeMemories() {
-    dbgUi('loadMem', '触发');
+    var rid = nextReqId('mem');
+    dbgUi('loadMem', 'req#' + rid + ' 触发');
     memoryLoadingState[1](true);
     try {
       var personaRaw = await ctx.callTool('memory_engine:list_characters', {});
@@ -406,11 +428,14 @@ loadingChatsState[1](false);
         character_id: personaId || undefined
       });
       var result = parseResult(raw);
-      dbgUi('loadMem', '返回 success=' + (result && result.success) + ' memories=' + (result && result.memories ? result.memories.length : '无'));
-      if (result && result.success) memoryState[1](result.memories || []);
+      dbgUi('loadMem', 'req#' + rid + ' 返回 success=' + (result && result.success) + ' memories=' + (result && result.memories ? result.memories.length : '无'));
+      if (result && result.success) {
+        dbgState('memoryState', result.memories || [], memoryState[0]);
+        memoryState[1](result.memories || []);
+      }
       else resultState[1]('记忆读取失败：' + ((result && result.message) || '未知错误'));
     } catch(e) {
-      dbgUi('loadMem', '异常 ' + (e.message || String(e)));
+      dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (e.message || String(e)));
       resultState[1]('记忆读取失败：' + (e.message || String(e)));
     }
     memoryLoadedState[1](Date.now());
