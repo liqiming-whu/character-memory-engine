@@ -1,5 +1,7 @@
 # Character Memory Engine 最新源码与文档审查总结
 
+> ⚠️ **状态更新（2026-08-06）**：本文为审查阶段结论。v2.1.2 mount 实验已实锤根因（详见 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`）：核心不是"多状态源"设计问题，而是 **Operit JS 模块重载 + 工具调用第二层初始化竞态（约 2/3 概率返回空壳）+ useState 持久化部分失效 + 空结果覆盖**。本文"状态机化 / 区分 null 与 [] / 统一状态管理"等建议仍有效，作为修复方案参考，但实施顺序以根因文档为准。
+
 ## 版本背景
 
 本文基于当前 Character Memory Engine 最新源码与开发文档审查结果整理。

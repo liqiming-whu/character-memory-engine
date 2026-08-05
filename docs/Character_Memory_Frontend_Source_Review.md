@@ -1,5 +1,7 @@
 # Character Memory System / Character Memory Engine 前端源码审查总结
 
+> ⚠️ **状态更新（2026-08-06）**：本文为源码审查阶段的假设性结论。v2.1.2 mount 实验已实锤真正根因——**Operit 每次进入插件界面重新执行整个 JS 模块 + 新模块早期工具调用返回"成功但空壳"（第二层初始化竞态）+ 空结果覆盖已有数据**。本文"生命周期 + 异步竞态"方向仍有效，但机制细节以 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md` 为准，修复方案按该文档执行。
+
 ## 一、审查背景
 
 本次审查基于：

@@ -1,5 +1,24 @@
 # Changelog
 
+## v2.1.2（2026-08-06，诊断实验版）
+
+### mount/unmount 实验（根因实锤）
+- [mount] 实例创建探针：每次组件实例创建输出 `[mount] 实例创建 tab=X`
+- 渲染计数器升级为 globalThis 模块级（`__dbgRC`）：同模块跨渲染递增，模块重新执行才归 1
+- **实验结论（三次进入铁证）**：
+  - Operit 每次进入插件界面**重新执行整个 JS 模块**（globalThis 计数器归零）
+  - 新模块执行早期工具调用约 2/3 概率返回"成功但空壳"（extracted=无 / chars=0，2-23ms 快速返回）→ **第二层初始化竞态实锤**
+  - useState key 持久化部分失效（dataState 保留、persona/dataLoadedTs 丢失）
+  - 空壳结果覆盖已有 27 条数据 = 白屏直接原因；chars=0 先返回覆盖 = "未识别角色卡"直接原因
+- 完整根因与修复计划见 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`
+
+## v2.1.1（2026-08-05，三探针诊断版）
+
+- 前端加载链路诊断探针（区分空加载类型 A/B/C）
+- 前端诊断日志写文件 dbg_ui.log（log_ui 工具，不经 worker）
+- 前端三探针：state 写入 / render 快照 / requestId
+- 诊断结论：问题类型锁定 A（数据没返回）；空覆盖好数据；dataLoadedTs 持久化部分失效
+
 ## v2.1.0（2026-08-05）
 
 ### 核心功能：AI 自动提取角色四类记忆
@@ -32,8 +51,8 @@
 ### 疑难问题（待解决，低优先级）
 - [ ] 界面加载优化：**未识别角色卡 / 正在读取 / 读取失败 / 界面数据未加载为空**
   - 现象：退出插件界面再进入时，角色页偶发"未识别到角色卡"或"正在读取"，其他 tab 偶发空白；过一会儿 / 切 tab / 重进可恢复
-  - 疑似 Operit 平台层：useState/useRef 跨重启持久化、onLoad 异步竞态、相同值 setState 不触发重渲染、工具调用调度层开销
-  - 已做缓解（共享缓存 / 时间戳守卫 / 占位 / 自动重试），残余问题暂不深挖
+  - ⚠️ **2026-08-06 v2.1.2 实验已实锤根因**：Operit 每次进入插件界面重新执行整个 JS 模块；新模块执行早期工具调用约 2/3 概率返回"成功但空壳"（第二层初始化竞态）；空壳结果覆盖已有数据 → 白屏；chars=0 先返回 → 未识别角色卡。详见 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`（修复方案已对齐，待执行）
+  - 已做缓解（共享缓存 / 时间戳守卫 / 占位 / 自动重试），正式修复按根因文档第六节顺序执行
 - [ ] 前端状态管理重构（外部审查建议，P6 方案参考）：
   - 已归档两份外部审查：`docs/Character_Memory_Frontend_Source_Review.md`（生命周期/竞态/多状态源分析）与 `docs/Character_Memory_Engine_review_notes.md`（架构评价与优化优先级）
   - 核心建议：统一状态管理（MemoryController 单一状态源，页面只做展示）、状态机化（INITIALIZING/WORKER_READY/LOADING/READY/EMPTY/ERROR）、区分 `null`（未加载）与 `[]`（已加载但为空）、延迟分析任务至空闲期、保留 executor 启动保护
