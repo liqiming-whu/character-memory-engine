@@ -102,7 +102,15 @@ METADATA
             { "name": "level", "type": "string", "required": false, "description": "级别过滤：ERROR/WARN/INFO/DEBUG" },
             { "name": "path", "type": "string", "required": false, "description": "日志文件路径（默认 engine.log）" }
         ]},
-        { "name": "diag_engine", "description": { "zh": "插件侧诊断（不经 worker）：进程/启动日志/engine.log", "en": "Diagnose engine without worker" }, "parameters": []}
+        { "name": "diag_engine", "description": { "zh": "插件侧诊断（不经 worker）：进程/启动日志/engine.log", "en": "Diagnose engine without worker" }, "parameters": []},
+        { "name": "trigger_analysis", "description": { "zh": "触发 AI 分析对话并提取结构化记忆", "en": "Trigger AI analyze chat" }, "parameters": [
+            { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
+        ]},
+        { "name": "set_injection_settings", "description": { "zh": "设置记忆注入配置（启用/持久化/最大条数）", "en": "Set memory injection settings" }, "parameters": [
+            { "name": "enabled", "type": "boolean", "required": false, "description": "是否启用注入" },
+            { "name": "persist", "type": "boolean", "required": false, "description": "是否跨对话持久化" },
+            { "name": "max_memories", "type": "integer", "required": false, "description": "每次注入最大条数，默认5" }
+        ]}
     ]
 }
 */
@@ -115,6 +123,8 @@ var WORKER_URL = 'http://127.0.0.1:8765';
 try { WORKER_URL = getEnv('MEMORY_ENGINE_WORKER_URL') || WORKER_URL; } catch (e) {}
 var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
+// worker 运行目录：/root（ext4 稳定，WAL 支持）；db 也在此运行，数据目录保留部署副本
+var ROOT_DIR = '/root/character_memory_engine';
 
 // ===== 调试探针（临时）：记录每次工具调用的返回，用于定位 UI "未知错误" =====
 var DBG_LOG = '/sdcard/Download/Operit/character_memory_engine/logs/dbg_call.log';
@@ -177,7 +187,7 @@ async function httpCall(action, payload) {
       'worker 调用超时。'
     );
   } catch (e) {
-    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
   var text = String(resp && (resp.content || resp.body || '') || '');
   var data = null;
@@ -201,7 +211,8 @@ async function deployWorkerToData() {
     // worker.py
     try {
       var wSrc = await ToolPkg.readResource('engine_worker_py', 'worker.py', false);
-      if (wSrc) await Tools.Files.copy(String(wSrc), DATA_DIR + '/worker.py', false, 'android', 'linux');
+      // v2.1.0：强制覆盖，避免 /root 残留旧版 worker.py 导致分析/截断修复不生效
+      if (wSrc) await Tools.Files.copy(String(wSrc), ROOT_DIR + '/worker.py', true, 'android', 'linux');
     } catch (e) {}
     // embed.py
     try {
@@ -226,9 +237,9 @@ async function deployWorkerToData() {
   }
 }
 
-// 尝试拉起常驻 worker（幂等：已在线则跳过）。
+// 尝试拉起常驻 worker（幂等：已在线则跳过；force=true 时强制完整重启）。
 // python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
-async function ensureWorkerUp() {
+async function ensureWorkerUp(force) {
   // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
   var LOCK = DATA_DIR + '/logs/launching.lock';
   try {
@@ -242,27 +253,30 @@ async function ensureWorkerUp() {
   try { Tools.Files.write(LOCK, String(Date.now()), false, 'android'); } catch (e) {}
   freshKey(); // 每次拉起强制全新会话：Operit 重启初期 terminal 未就绪会留下坏会话，绝不复用
   var ping = await httpCall('ping_worker', {});
-  if (ping && ping.success) return { success: true, alreadyUp: true };
+  if (!force && ping && ping.success) return { success: true, alreadyUp: true };
   // 先确保 worker.py 等在 DATA_DIR
   try { await deployWorkerToData(); } catch (e) {}
   var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 
   var pyCmd = await detectPython();
   if (!pyCmd) {
-    return { success: false, message: '未找到可用的 python3。请手动执行：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+    return { success: false, message: '未找到可用的 python3。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
 
-  // 复制全部 python 文件 + models 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
-  var ROOT_DIR = '/root/character_memory_engine';
-  // 无条件杀掉旧 worker 再启动（pgrep 守护不可靠：僵尸/死进程匹配会阻止重启）
+  // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
+  // db 策略：权威在 /root（worker 首次运行自动生成）；数据目录是热备副本（sync_db 写回）
+  // 1) worker 在线时先 HTTP 热备 2) 兜底文件写回 3) 仅首次迁移（/root 无 db 且数据目录有，老版本升级）
   var script = [
     "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
+    "python3 -c \"import urllib.request,json;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765',data=json.dumps({'action':'sync_db'}).encode()),timeout=3)\" 2>/dev/null || true",
+    "if [ -f " + ROOT_DIR + "/engine.db ]; then cp -f " + ROOT_DIR + "/engine.db " + DATA_DIR + "/engine.db 2>/dev/null || true; fi",
+    "if [ ! -f " + ROOT_DIR + "/engine.db ] && [ -f " + DATA_DIR + "/engine.db ]; then cp -f " + DATA_DIR + "/engine.db " + ROOT_DIR + "/engine.db; fi",
     "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
     "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
     "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
     "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
+    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (typeof terminal.hiddenExec === 'function') {
@@ -274,13 +288,13 @@ async function ensureWorkerUp() {
       try { await terminal.close(sess.sessionId); } catch (e) {}
     }
   } catch (e) {
-    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
   await new Promise(function (r) { setTimeout(r, 3000); });
   var ping2 = await httpCall('ping_worker', {});
   try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
   if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 }
 
 // 探测可用 python3：优先 proot venv（完整向量），备选系统 python3。
@@ -377,9 +391,13 @@ function run(action, payload) {
 // 工具导出：显式 exports（Operit subpackage 解析器识别显式导出名）
 function makeTool(action) {
   return function (params) {
+    // v2.1.0：计时探针——记录每次工具调用从 UI 发起点到返回的总耗时（定位 Operit 调用层开销）
+    var t0 = Date.now();
     return run(action, params || {}).then(function (result) {
+      dbgLog('timing', { action: action, ms: Date.now() - t0 });
       return finish(result);
     }).catch(function (e) {
+      dbgLog('timing', { action: action, ms: Date.now() - t0, error: String((e && e.message) || e) });
       return finish({ success: false, message: e && e.message ? e.message : String(e) });
     });
   };
@@ -417,6 +435,16 @@ exports.get_logs = makeTool("get_logs");
 async function analyzeChat(params) {
     try {
         var chatId = (params && params.chat_id) || '';
+        // v2.1.0：优先用 trigger.json 的当前对话（main.js 每次消息都会更新，最可靠）
+        if (!chatId) {
+            try {
+                var tr = await Tools.Files.read(DATA_DIR + '/trigger.json');
+                if (tr && tr.content) {
+                    var tj = JSON.parse(tr.content);
+                    if (tj && tj.chatId) chatId = String(tj.chatId);
+                }
+            } catch (e) {}
+        }
         // 未指定对话时，取最近对话（listChats 排序参数不可靠，拉回一批后本地按 updatedAt 排序）
         if (!chatId) {
             try {
@@ -469,7 +497,10 @@ async function analyzeChat(params) {
         if (!endpoint || !apiKey) {
             return finish({ success: false, message: '未配置 API Endpoint 或 Key（请在设置中配置 MEMORY_SYSTEM_*）' });
         }
+        try { dbgLog('analyze-cfg', { endpoint: endpoint ? 'ok' : 'EMPTY', key: apiKey ? 'ok' : 'EMPTY', model: model }); } catch (e) {}
         // 传给 worker 分析（CLI 一次性调用）
+        try { dbgLog('analyze', { chatId: chatId, chatLen: chat_text.length, characterId: (params && params.character_id) || '' }); } catch (e) {}
+        try { dbgLog('analyze-run', { chatId: chatId, chatLen: chat_text.length }); } catch (e) {}
         var result = await run('analyze_chat', {
             chat_text: chat_text,
             endpoint: endpoint,
@@ -548,9 +579,13 @@ function deployInstall(params) {
   });
 }
 function deployRestart(params) {
-  return run('deploy_restart', params || {}).then(function (result) {
-    return finish(result);
-  }).catch(function (e) {
-    return finish({ success: false, message: e && e.message ? e.message : String(e) });
-  });
+  // 先热备当前 db（worker 在线时），再强制完整重启（kill + db 同步 + 拉起）
+  return Promise.resolve()
+    .then(function () { try { return run('sync_db', {}); } catch (e) { return null; } })
+    .then(function () { return ensureWorkerUp(true); })
+    .then(function (result) {
+      return finish(result);
+    }).catch(function (e) {
+      return finish({ success: false, message: e && e.message ? e.message : String(e) });
+    });
 }

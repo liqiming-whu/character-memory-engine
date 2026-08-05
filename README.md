@@ -62,7 +62,20 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
 - 语义相似度：奶茶 vs 爱喝奶茶 = 0.95，奶茶 vs 健身房 = 0.47
 - 方案 A 8 项全 PASS、方案 B 22 项全 PASS、旧备份导入幂等 PASS
 - **自动拉起（v2.0.17）**：重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）
+- **AI 自动提取四类角色记忆（v2.1.0）**：worker `analyze_chat` 调 DeepSeek 自动提取角色信息/关系/偏好/互动规则，四类 8 条验证落库
 详见 [docs/TECH_VALIDATION.md](docs/TECH_VALIDATION.md)。
+
+### 性能实测（v2.1.0，无瓶颈）
+- **后端 SQLite 查询**：单次 7-46ms；四次分类查询合计约 97ms；一次全量查询 14ms
+- **工具调用（插件内 HTTP + worker，60 次实测）**：最快 6ms / 最慢 38ms / 平均 16.8ms
+- **分析链路**：短对话 13.5s 成功、2 万字符长对话 15s 成功
+- **结论**：后端与工具调用层无性能瓶颈；体感慢主要来自 Operit 前端框架调度层与持久化状态机制
+
+### 工具链可行性（v2.1.0）
+完整链路跨平台验证通过：Operit 插件（UI/subpackage）→ HTTP 桥接 → Python worker（proot Ubuntu 24）→ SQLite。Android 真机 + Ubuntu 子系统双向可用，无需外部服务器。
+
+### 已知疑难（待解决，低优先级）
+- [ ] **界面加载优化**：未识别角色卡 / 正在读取 / 读取失败 / 界面数据未加载为空。现象：退出插件界面再进入时偶发；过一会儿/切 tab/重进可恢复。疑似 Operit 平台层（useState/useRef 跨重启持久化、onLoad 异步竞态、相同值 setState 不触发重渲染、工具调用调度层开销）。已做缓解（共享缓存/时间戳守卫/占位/自动重试），残余问题暂不深挖。详见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 项目结构
 
@@ -86,6 +99,8 @@ docs/
 - [x] P2 语义去重增强（文本相似度 + 向量去重方案 A，8/8 PASS）
 - [x] P3 插件接入（HTTP 桥接 + subpackage 工具 + 前端复用，真机全绿）
 - [x] P4 语义检索（sqlite-vec 向量召回 + 旧备份幂等导入）
+- [x] P5 AI 自动提取角色四类记忆 + UI 性能优化（v2.1.0，见 CHANGELOG.md）
+- [ ] P6 疑难界面加载问题（未识别角色卡/正在读取/空白，低优先级，Operit 平台层嫌疑）
 
 ## 开发规范
 

@@ -14,6 +14,8 @@ var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 // 数据按 DATA_DIR 规范落到 /sdcard/Download/Operit/character_memory_engine。
 var WORKER_PORT = 8765;
 var TRIGGER_FILE = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
+// v2.1.0：上次已保存的角色卡 id（变化才写 characters 表）
+var lastSavedCardId = '';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
@@ -154,6 +156,7 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
 var WORKER_URL = 'http://127.0.0.1:8765';
 try { WORKER_URL = getEnv('MEMORY_ENGINE_WORKER_URL') || WORKER_URL; } catch (e) {}
 var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
+var ROOT_DIR = '/root/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
 async function httpCall(action, payload) {
@@ -207,7 +210,7 @@ async function deployWorkerToData() {
     for (var i = 0; i < pairs.length; i++) {
       try {
         var src = await ToolPkg.readResource(pairs[i][0], pairs[i][1], false);
-        if (src) await Tools.Files.copy(String(src), DATA_DIR + '/' + pairs[i][1], false, 'android', 'linux');
+        if (src) await Tools.Files.copy(String(src), DATA_DIR + '/' + pairs[i][1], true, 'android', 'linux');
       } catch (e) {}
     }
     var mf = [['engine_model_config','config.json'],['engine_model_onnx','model_int8.onnx'],['engine_model_tokenizer','tokenizer.json']];
@@ -224,10 +227,11 @@ async function deployWorkerToData() {
 }
 
 // 尝试拉起常驻 worker（幂等）。
-// 方案：worker.py/embed.py/models 复制到 /root/character_memory_engine（ext4 稳定），
-// 用 venv python 运行（完整向量），数据经 --db 落到 /sdcard（用户可访问）。
+// 方案：worker.py/embed.py/models/db 复制到 /root/character_memory_engine（ext4 稳定），
+// 用 venv python 运行（完整向量），db 在 /root 运行（WAL），数据目录保留部署副本（sync_db 热备）。
 // setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
 async function ensureWorkerUp() {
+  var ROOT_DIR = '/root/character_memory_engine';
   // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
   var LOCK = DATA_DIR + '/logs/launching.lock';
   try {
@@ -246,18 +250,21 @@ async function ensureWorkerUp() {
   try { await deployWorkerToData(); } catch (e) {}
   var pyCmd = await detectPython();
   if (!pyCmd) {
-    return { success: false, message: '未找到可用 python3，请手动启动：setsid /root/.venv/bin/python3.12 ' + DATA_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+    return { success: false, message: '未找到可用 python3，请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
-  // 复制全部 python 文件 + models 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
-  var ROOT_DIR = '/root/character_memory_engine';
-  // 无条件杀掉旧 worker 再启动（pgrep 守护不可靠：僵尸/死进程匹配会阻止重启）
+  // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
+  // db 策略：权威在 /root（worker 首次运行自动生成）；数据目录是热备副本（sync_db 写回）
+  // 1) worker 在线时先 HTTP 热备 2) 兜底文件写回 3) 仅首次迁移（/root 无 db 且数据目录有，老版本升级）
   var script = [
     "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
+    "python3 -c \"import urllib.request,json;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765',data=json.dumps({'action':'sync_db'}).encode()),timeout=3)\" 2>/dev/null || true",
+    "if [ -f " + ROOT_DIR + "/engine.db ]; then cp -f " + ROOT_DIR + "/engine.db " + DATA_DIR + "/engine.db 2>/dev/null || true; fi",
+    "if [ ! -f " + ROOT_DIR + "/engine.db ] && [ -f " + DATA_DIR + "/engine.db ]; then cp -f " + DATA_DIR + "/engine.db " + ROOT_DIR + "/engine.db; fi",
     "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
     "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
     "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
     "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + DATA_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
+    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (Tools.System && Tools.System.terminal && typeof Tools.System.terminal.hiddenExec === 'function') {
@@ -271,7 +278,7 @@ async function ensureWorkerUp() {
   var ping2 = await httpCall('ping_worker', {});
   try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
   if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + DATA_DIR + '/engine.db &' };
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
@@ -285,6 +292,24 @@ async function onPromptFinalize(input) {
     var activePrompt = evt.metadata && evt.metadata.activePrompt;
     var callerCardId = (activePrompt && activePrompt.type === 'character_card') ? String(activePrompt.id || '') : '';
     var personaName = (activePrompt && activePrompt.name) ? String(activePrompt.name || '') : '';
+
+    // v2.1.0：自动保存当前角色卡到 characters 表（角色页依赖它识别；变化时才写）
+    if (callerCardId) {
+      try {
+        setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', callerCardId);
+        setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', personaName || '未命名角色');
+        setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_TYPE', 'character_card');
+      } catch (e) {}
+      if (callerCardId !== lastSavedCardId) {
+        lastSavedCardId = callerCardId;
+        try {
+          var sv = await httpCall('save_character', { id: callerCardId, name: personaName || '未命名角色' });
+          if (!(sv && sv.success)) jsLog('DEBUG', 'save_character 失败: ' + ((sv && sv.message) || 'unknown'));
+        } catch (e) {
+          jsLog('DEBUG', 'save_character 异常: ' + (e.message || String(e)));
+        }
+      }
+    }
 
     var trigger = null;
     try {
@@ -300,12 +325,18 @@ async function onPromptFinalize(input) {
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 写 trigger 失败: ' + (e.message || String(e)));
       }
+      // v2.1.0：首次识别到角色卡立即分析一次（不等 20 分钟冷却），让角色页尽快有数据
+      if (callerCardId) {
+        autoAnalyzeChat(currentChatId, callerCardId, personaName).catch(function() {});
+      }
     } else {
       var cooldownPassed = (now - (trigger.cooldownStart || now)) >= COOLDOWN_MS;
       var processChatId = trigger.chatId || currentChatId;
       var chatIdChanged = trigger.chatId && trigger.chatId !== currentChatId;
-      if (cooldownPassed || chatIdChanged) {
-        jsLog('INFO', 'onPromptFinalize: 触发自动分析 chatId=' + processChatId + ' cooldownPassed=' + cooldownPassed + ' chatChanged=' + chatIdChanged);
+      // v2.1.0：角色卡变化也立即分析（切换角色后快速建立该角色的记忆）
+      var cardChanged = !!callerCardId && (trigger.callerCardId || '') !== callerCardId;
+      if (cooldownPassed || chatIdChanged || cardChanged) {
+        jsLog('INFO', 'onPromptFinalize: 触发自动分析 chatId=' + processChatId + ' cooldownPassed=' + cooldownPassed + ' chatChanged=' + chatIdChanged + ' cardChanged=' + cardChanged);
         autoAnalyzeChat(processChatId, trigger.callerCardId || callerCardId, trigger.personaName || personaName).catch(function() {});
       }
       try {
@@ -325,10 +356,28 @@ async function onPromptFinalize(input) {
 function onAppCreate() {
     try {
         setTimeout(function () {
-            ensureWorkerUp().then(function (up) {
+            (async function () {
+                // v2.1.0：先强制部署最新 worker.py 到 /root（覆盖旧版残留）
+                try { await deployWorkerToData(); } catch (e) {}
+                // 版本检查：文件 VERSION 与运行中进程不一致则 kill，下次调用自动拉起新版
+                try {
+                    var f = await Tools.Files.read(ROOT_DIR + '/worker.py');
+                    var ft = (f && (f.content || f.text)) || '';
+                    var m = /VERSION\s*=\s*["']([^"']+)["']/.exec(ft);
+                    var fileVer = m ? m[1] : '';
+                    if (fileVer) {
+                        var pingV = await httpCall('ping_worker', {});
+                        if (pingV && pingV.success && pingV.version && pingV.version !== fileVer) {
+                            jsLog('INFO', 'worker 版本变化 ' + pingV.version + ' -> ' + fileVer + '，重启 worker');
+                            var killCmd = "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done";
+                            await hiddenExecSafe(killCmd, 10000);
+                        }
+                    }
+                } catch (e) {}
+                var up = await ensureWorkerUp();
                 try { setEnv('MEMORY_ENGINE_WORKER_READY', (up && up.success) ? '1' : '0'); } catch (e) {}
                 if (!up || !up.success) jsLog('WARN', 'onAppCreate: worker 未就绪: ' + (up && up.message ? up.message : '未知原因'));
-            }).catch(function (e) {
+            })().catch(function (e) {
                 jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
                 try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
             });

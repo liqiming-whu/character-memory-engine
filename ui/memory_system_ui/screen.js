@@ -72,6 +72,9 @@ function Screen(ctx) {
   var injectionState = ctx.useState('injectionSettings', null);
   var injectionSavingState = ctx.useState('injectionSaving', false);
   var injectionLimitInputState = ctx.useState('injectionLimitInput', '');
+  // 注入设置保存竞态保护：序号保证旧响应不覆盖新状态；时间戳防 loadData 异步覆盖
+  var injectionSaveSeqRef = ctx.useRef('injectionSaveSeq', 0);
+  var lastInjectionSaveRef = ctx.useRef('lastInjectionSave', 0);
   // 数据备份
   var backupBusyState = ctx.useState('backupBusy', false);
   var backupResultState = ctx.useState('backupResult', '');
@@ -109,14 +112,17 @@ var totalChatsState = ctx.useState('msgs_totalChats', (uiBoot.totalChats !== und
 var initRef = ctx.useRef('init', false);
 var triggerPollRef = ctx.useRef('triggerPoll', 0);
 var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
+var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
   if (!initRef.current) {
  initRef.current = true;
+ // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
+ analyzingState[1](false);
  // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
  (async function() {
    try {
-     var raw = await ctx.callTool('memory_system:trigger_analysis', {});
+     var raw = await ctx.callTool('memory_engine:trigger_analysis', {});
      var r = parseResult(raw);
      if (r && r.started) {
        // 异步分析已启动 → 显示"分析中"并轮询刷新数据
@@ -174,17 +180,20 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
   // 首次状态为空时读取一次；后续由根节点 onLoad、分析完成或用户操作明确刷新。
   // 用 state（dataLoadedState）作唯一权威：只要数据未加载就重新调度，避免 useRef 在
   // 快速切换实例复用时残留 true 导致加载永久跳过。
-  if (!dataLoadedState[0] && !dataLoadScheduledRef.current) {
+  // v2.1.0：时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
+  var dataLoadedTs = Number(dataLoadedState[0] || 0);
+  if ((!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) && !dataLoadScheduledRef.current) {
     dataLoadScheduledRef.current = true;
     setTimeout(function() {
       loadData().then(function(ok) {
-        if (ok) dataLoadedState[1](true); // 失败不置 loaded，后续帧会重试
+        dataLoadedState[1](ok ? Date.now() : 0); // 成功记时间戳；失败置 0 下帧重试
       }).finally(function() { dataLoadScheduledRef.current = false; });
     }, 0);
   }
   // ===== 初始化时加载记忆 =====
   var currentTab = tabState[0];
-  if ((currentTab === 3) && !memoryLoadedState[0] && !memoryLoadingState[0] && !memoryLoadScheduledRef.current) {
+  var memoryLoadedTs = Number(memoryLoadedState[0] || 0);
+  if ((currentTab === 3) && (!memoryLoadedTs || (Date.now() - memoryLoadedTs) > 60000) && !memoryLoadingState[0] && !memoryLoadScheduledRef.current) {
     memoryLoadScheduledRef.current = true;
     setTimeout(function() {
       loadKnowledgeMemories().finally(function() { memoryLoadScheduledRef.current = false; });
@@ -206,7 +215,7 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
     analyzedChatsInitRef.current = true;
     (async function() {
       try {
-        var raw = await ctx.callTool('memory_system:get_analyzed_chats', {});
+        var raw = await ctx.callTool('memory_engine:get_analyzed_chats', {});
         var r = parseResult(raw);
         if (r && r.success && r.chats) {
           analyzedChatsState[1](r.chats);
@@ -287,8 +296,11 @@ loadingChatsState[1](false);
                 menstrual: r.extracted && r.extracted.menstrual || []
             });
             if (r.injection) {
-              injectionState[1](r.injection);
-              if (r.injection.maxMemories) injectionLimitInputState[1](String(r.injection.maxMemories));
+              // 竞态保护：用户刚保存过（3秒内），跳过 loadData 的旧值覆盖
+              if (Date.now() - (lastInjectionSaveRef.current || 0) > 3000) {
+                injectionState[1](r.injection);
+                if (r.injection.maxMemories) injectionLimitInputState[1](String(r.injection.maxMemories));
+              }
             }
             if (r.uiState && r.uiState.data) {
                 var saved = r.uiState.data;
@@ -315,8 +327,18 @@ loadingChatsState[1](false);
   }
 
   async function loadScreenPersona() {
-    // 每次进入都重新加载角色上下文与记忆；不因之前加载过而跳过，
-    // 避免快速切换实例复用时持久 ref/state 残留导致角色页显示异常。
+    // v2.1.0：60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
+    var pC = personaCacheRef.current || {};
+    if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
+      ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(pC.id || ''));
+      ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(pC.name || ''));
+      var curC = screenPersonaState[0];
+      var npC = { id: String(pC.id || ''), name: String(pC.name || ''), type: String(pC.type || 'character_card') };
+      if (!curC || curC.id !== npC.id || curC.name !== npC.name || curC.type !== npC.type) {
+        screenPersonaState[1](npC);
+      }
+      return;
+    }
     try {
       var pRaw = await ctx.callTool('memory_engine:list_characters', {});
       var pResult = parseResult(pRaw);
@@ -326,20 +348,15 @@ loadingChatsState[1](false);
         : { id: '', name: '', type: '' };
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(p.id || ''));
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(p.name || ''));
-      screenPersonaState[1]({ id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') });
-      if (p.id) {
-        try {
-          var mRaw = await ctx.callTool('memory_engine:list_memories', {
-            category: 'character',
-            character_id: String(p.id),
-            limit: 100
-          });
-          var mResult = parseResult(mRaw);
-          if (mResult && mResult.success && mResult.memories) {
-            screenCharMemoriesState[1](mResult.memories);
-          }
-        } catch (e) {}
+      // v2.1.0：相同角色不重复 setState（防渲染死循环）
+      var curSP = screenPersonaState[0];
+      var np = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') };
+      if (!curSP || curSP.id !== np.id || curSP.name !== np.name || curSP.type !== np.type) {
+        screenPersonaState[1](np);
       }
+      // v2.1.0：不再主动查询角色记忆——避免每次切回都覆盖用户的分类选择；
+      // 角色页列表由 character 组件内部按当前分类自行加载
+      personaCacheRef.current = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || ''), ts: Date.now() };
     } catch (e) {}
   }
 
@@ -360,7 +377,7 @@ loadingChatsState[1](false);
     } catch(e) {
       resultState[1]('记忆读取失败：' + (e.message || String(e)));
     }
-    memoryLoadedState[1](true);
+    memoryLoadedState[1](Date.now());
     memoryLoadingState[1](false);
   }
 
@@ -372,30 +389,31 @@ loadingChatsState[1](false);
   }
 
   async function saveInjectionSettings(patch) {
-    if (injectionSavingState[0]) return;
+    var seq = (injectionSaveSeqRef.current = (injectionSaveSeqRef.current || 0) + 1);
     var current = injectionState[0] || { enabled: false, persist: true, maxMemories: 5 };
     var next = {
       enabled: patch.enabled !== undefined ? patch.enabled : current.enabled,
       persist: patch.persist !== undefined ? patch.persist : current.persist,
       maxMemories: current.maxMemories
     };
-    injectionSavingState[1](true);
     injectionState[1](next);
     try {
-      var raw = await ctx.callTool('memory_system:set_injection_settings', next);
+      var raw = await ctx.callTool('memory_engine:set_injection_settings', next);
       var r = parseResult(raw);
+      if (seq !== injectionSaveSeqRef.current) return; // 已有更新的保存请求，旧响应不覆盖
       if (r && r.success && r.injection) {
         injectionState[1](r.injection);
+        lastInjectionSaveRef.current = Date.now();
         resultState[1]('✅ 记忆注入设置已保存');
       } else {
         injectionState[1](current);
         resultState[1]('❌ ' + ((r && r.message) || '注入设置保存失败'));
       }
     } catch (e) {
+      if (seq !== injectionSaveSeqRef.current) return;
       injectionState[1](current);
       resultState[1]('❌ ' + (e.message || String(e)));
     }
-    injectionSavingState[1](false);
   }
 
   var injectionLimitTimerRef = ctx.useRef('injectionLimitTimer', null);
@@ -421,7 +439,7 @@ loadingChatsState[1](false);
     }
     injectionSavingState[1](true);
     try {
-      var raw = await ctx.callTool('memory_system:set_injection_settings', { max_memories: limit });
+      var raw = await ctx.callTool('memory_engine:set_injection_settings', { max_memories: limit });
       var r = parseResult(raw);
       if (r && r.success && r.injection) {
         injectionState[1](r.injection);
@@ -478,21 +496,47 @@ loadingChatsState[1](false);
       }
       var filePath = file.path || file.uri || '';
       backupResultState[1]('🔄 正在校验备份...');
-      var inspRaw = await ctx.callTool('memory_engine:inspect_engine', { path: filePath });
-      var insp = parseResult(inspRaw);
-      if (!insp || !insp.success || insp.valid !== true) {
-        backupResultState[1]('❌ 备份校验失败：' + ((insp && insp.message) || '文件损坏或格式不正确'));
-        backupBusyState[1](false);
-        return;
+      var isNewFormat = false;
+      var inspMsg = '';
+      try {
+        var inspRaw = await ctx.callTool('memory_engine:inspect_engine', { path: filePath });
+        var insp = parseResult(inspRaw);
+        if (insp && insp.success && insp.valid === true) {
+          isNewFormat = true;
+        } else if (insp && insp.message) {
+          inspMsg = insp.message;
+        }
+      } catch (e) {
+        // Operit 对失败工具调用抛异常（message 取工具返回），视为非新格式
+        inspMsg = (e && e.message) ? e.message : String(e);
       }
-      backupResultState[1]('🔄 备份有效，正在恢复（' + (backupModeState[0] === 'overwrite' ? '覆盖' : '合并') + '模式）...');
-      var resRaw = await ctx.callTool('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
-      var res = parseResult(resRaw);
-      if (res && res.success) {
-        backupResultState[1]('✅ 恢复完成（' + (res.mode || 'merge') + ' 模式' + (res.fileCount !== undefined ? '，' + res.fileCount + ' 个文件' : '') + '）');
-        await loadData();
+      if (isNewFormat) {
+        // 新格式（engine.db + manifest v1）：直接恢复
+        backupResultState[1]('🔄 备份有效，正在恢复（' + (backupModeState[0] === 'overwrite' ? '覆盖' : '合并') + '模式）...');
+        var resRaw = await ctx.callTool('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
+        var res = parseResult(resRaw);
+        if (res && res.success) {
+          backupResultState[1]('✅ 恢复完成（' + (res.mode || 'merge') + ' 模式' + (res.fileCount !== undefined ? '，' + res.fileCount + ' 个文件' : '') + '）');
+          await loadData();
+        } else {
+          backupResultState[1]('❌ ' + ((res && res.message) || '恢复失败'));
+        }
       } else {
-        backupResultState[1]('❌ ' + ((res && res.message) || '恢复失败'));
+        // 新格式校验失败：尝试旧版本（v1.5.x）数据导入（data/<cat>.json 结构）
+        backupResultState[1]('🔄 新格式校验未通过（' + (inspMsg || '格式不符') + '），尝试按旧版本数据导入...');
+        try {
+          var impRaw = await ctx.callTool('memory_engine:import_legacy_backup', { path: filePath });
+          var imp = parseResult(impRaw);
+          if (imp && imp.success) {
+            var st = imp.stats || {};
+            backupResultState[1]('✅ 旧版本数据导入完成：' + (st.items || 0) + ' 条' + ((st.deduped || 0) ? '（去重 ' + st.deduped + '）' : '') + ((st.characters || 0) ? '，角色 ' + st.characters + ' 个' : '') + ((st.errors || 0) ? '，错误 ' + st.errors : ''));
+            await loadData();
+          } else {
+            backupResultState[1]('❌ 旧版本导入失败：' + ((imp && imp.message) || '格式不支持'));
+          }
+        } catch (e2) {
+          backupResultState[1]('❌ 旧版本导入失败：' + ((e2 && e2.message) ? e2.message : String(e2)));
+        }
       }
     } catch (e) {
       backupResultState[1]('❌ ' + (e.message || String(e)));
@@ -502,9 +546,33 @@ loadingChatsState[1](false);
 
   async function doAnalyze() {
     analyzingState[1](true);
-    resultState[1]('🔄 分析中...');
+    resultState[1]('分析中（约30-80秒，可切换页面，分析会继续）');
+    var analyzeTimer = setTimeout(function() {
+      analyzingState[1](false);
+      resultState[1]('分析仍在后台进行（约30-80秒），请稍后刷新角色页查看');
+      try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
+    }, 120000);
     try {
-      var raw = await ctx.callTool('memory_engine:analyze_chat', {});
+      // v2.1.0：先查 characters 表拿当前角色（worker 跨进程可靠通道）；
+      // env 只做兜底（UI 的 ctx.getEnv 可能读不到 main.js setEnv 的跨进程值）
+      var actId = '';
+      var actName = '';
+      try {
+        var cRaw = await ctx.callTool('memory_engine:list_characters', {});
+        var cR = parseResult(cRaw);
+        if (cR && cR.success && cR.characters && cR.characters.length > 0) {
+          actId = String(cR.characters[0].id || '');
+          actName = String(cR.characters[0].name || '');
+        }
+      } catch (e) {}
+      if (!actId) {
+        try { actId = String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID') || ''); } catch (e) {}
+        try { actName = String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME') || ''); } catch (e) {}
+      }
+      var raw = await ctx.callTool('memory_engine:analyze_chat', {
+        character_id: actId || undefined,
+        persona_name: actName || ''
+      });
       var r = parseResult(raw);
       if (r && r.success) {
         await loadData();
@@ -513,12 +581,16 @@ loadingChatsState[1](false);
       } else {
         resultState[1]((r && r.message) || '❌ 分析失败');
       }
+      // v2.1.0：分析结束（成功/失败）标记全局时间戳，角色页下次进入强制刷新最新数据
+      try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     } catch (e) {
-      resultState[1]('❌ ' + (e.message || String(e)));
+      // v2.1.0：Operit 工具调用约 12 秒超时，但 worker 后台仍在分析（可达 80 秒）
+      resultState[1]('分析请求超时，后台仍在进行（约30-80秒），请稍后刷新角色页查看');
+      try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     }
+    clearTimeout(analyzeTimer);
     analyzingState[1](false);
   }
-
   async function deleteItem(category, index) {
     try {
       var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, index: index });
@@ -667,7 +739,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
           UI.Text({ text: (allData.todos || []).length + ' 待办 · ' + pendingTodoCount + ' 待完成 · ' + (allData.events || []).length + ' 事件', style: 'labelSmall', color: colors.onSurfaceVariant }),
         ]),
         UI.Row({ verticalAlignment: 'center' }, [
-          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) doAnalyze(); } }, [
+          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) doAnalyze(); else resultState[1]('正在分析中，请稍候（约30-60秒）'); } }, [
             UI.Text({ text: analyzing ? '⏳ 分析中' : '🤖 分析', style: 'labelSmall', color: analyzing ? colors.error : colors.onPrimary, fontWeight: 'bold' }),
           ]),
         ]),
@@ -767,7 +839,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
   for (var ti = 0; ti < TAB_REGISTRY.length; ti++) {
     (function(t) {
       var isSel = currentTab === t.id;
-      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3) memoryLoadedState[1](false); } }, [
+      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3) memoryLoadedState[1](0); } }, [
         UI.Column({ fillMaxWidth: true, fillMaxHeight: true, horizontalAlignment: 'center', verticalArrangement: 'center' }, [
           UI.Box({ fillMaxWidth: true, contentAlignment: 'center' }, [
             UI.Icon({ name: t.icon, tint: isSel ? colors.primary : colors.outline, size: 21 }),
@@ -832,7 +904,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
     case 4: tabContent = characterTab.render(ctx, screenPersonaState[0], screenCharMemoriesState[0]); break;
     case 5: tabContent = [
       UI.Text({ text: '设置', style: 'titleMedium', color: colors.onSurface, fontWeight: 'bold' }),
-      UI.Text({ text: '提取模型配置仅用于结构化分析；长期记忆使用 Operit 原生 Memory。', style: 'bodySmall', color: colors.onSurfaceVariant }),
+      UI.Text({ text: '长期记忆由本插件记忆引擎提供（SQLite + 向量检索）；提取模型仅用于结构化分析。', style: 'bodySmall', color: colors.onSurfaceVariant }),
       UI.Spacer({ height: 4 }),
       UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 10 }, containerColor: colors.surfaceContainerHigh, padding: 12, border: { width: 1, color: colors.outlineVariant } }, [
         UI.Column({ spacing: 8 }, [
@@ -864,7 +936,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
       UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 10 }, containerColor: colors.surfaceContainerHigh, padding: 12, border: { width: 1, color: colors.outlineVariant } }, [
         UI.Column({ spacing: 8 }, [
           UI.Text({ text: '💾 数据备份', style: 'labelMedium', fontWeight: 'bold', color: colors.primary }),
-          UI.Text({ text: '备份六类生活数据、注入设置、角色上下文与对账标记；不备份 Operit 原生 Memory。', style: 'labelSmall', color: colors.onSurfaceVariant }),
+          UI.Text({ text: '备份生活数据、记忆库（SQLite）、注入设置、角色上下文与对账标记。', style: 'labelSmall', color: colors.onSurfaceVariant }),
           UI.Row({ fillMaxWidth: true, spacing: 8 }, [
             UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.primary, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: doExportBackup }, [
               UI.Row({ verticalAlignment: 'center' }, [
@@ -905,10 +977,24 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
     case 6: tabContent = deployTab.render(ctx); break;
     default: tabContent = overviewTab.render(ctx, allData);
   }
+  // v2.1.0：数据型 tab 未就绪时显示加载占位，避免快速切换出现空白
+  var dts0 = Number(dataLoadedState[0] || 0);
+  var dd0 = dataState[0];
+  var dataReady0 = dd0 && (dd0.events || dd0.info || dd0.todos || dd0.contacts || dd0.finance);
+  if (!dts0 && !dataReady0 && (currentTab === 0 || currentTab === 1 || currentTab === 2)) {
+    tabContent = [
+      UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, containerColor: colors.surfaceContainerHigh, padding: 24 }, [
+        UI.Column({ horizontalAlignment: 'center', spacing: 8 }, [
+          UI.Text({ text: '正在加载数据…', style: 'titleMedium', color: colors.onSurface }),
+          UI.Text({ text: '首次读取可能需要几秒，请稍候', style: 'bodySmall', color: colors.onSurfaceVariant }),
+        ]),
+      ]),
+    ];
+  }
 
   // ===== 返回 =====
   return UI.Column({ fillMaxSize: true, padding: 8, onLoad: async function() {
-    await loadData();
+    // v2.1.0：loadData 已由 render 内 dataLoadedState 守卫调度，这里不再重复调用（避免每次进入两次 load_life_data）
     await loadScreenPersona();
   } }, [
     headerCard,

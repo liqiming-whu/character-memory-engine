@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "2.0.25"
+VERSION = "2.1.0"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -1045,6 +1045,53 @@ def deploy_install(conn, params):
         return {"success": False, "message": "安装失败: " + str(e) + setup_hint}
 
 
+def sync_db(conn, params):
+    """在线热备当前 db 到数据目录（sqlite backup API，含 WAL 已提交数据，原子替换）。
+
+    架构：worker 的 db 在 /root（ext4，WAL 稳定），数据目录的 engine.db 是部署副本。
+    每次部署/重启前先调本 action，保证数据目录副本不落后。
+    """
+    try:
+        db_path = _current_db_path(conn)
+        dst_path = os.path.join(DATA_DIR, "engine.db")
+        tmp_path = dst_path + ".tmp"
+        src = sqlite3.connect(db_path)
+        try:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            dst = sqlite3.connect(tmp_path)
+            try:
+                src.backup(dst)
+            finally:
+                dst.close()
+            os.replace(tmp_path, dst_path)
+            return {"success": True, "synced": True, "db": db_path, "size": os.path.getsize(dst_path)}
+        finally:
+            src.close()
+    except Exception as e:
+        return {"success": False, "message": "sync_db 失败: " + str(e)}
+
+
+def _start_db_sync_loop(interval=600):
+    """定时把 /root 的 db 热备到数据目录（默认每 10 分钟一次）。"""
+    def loop():
+        while True:
+            time.sleep(interval)
+            try:
+                c = get_conn(DB_PATH)
+                try:
+                    sync_db(c, {})
+                finally:
+                    c.close()
+            except Exception:
+                pass
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
+
 def deploy_restart(conn, params):
     """杀掉旧 worker 进程并重启（仅报告；实际重启由插件侧发起）。"""
     import subprocess
@@ -1063,7 +1110,7 @@ def deploy_restart(conn, params):
 
 
 def save_ui_state(conn, params):
-    """保存 UI 状态（last_ui_state.json）。"""
+    """保存 UI 状态（last_ui_state.json），合并写入并保留 injection 配置段。"""
     state = params.get("state_json") or params.get("state")
     if not state:
         return {"success": False, "message": "missing state_json"}
@@ -1073,8 +1120,27 @@ def save_ui_state(conn, params):
         parsed = state
     try:
         path = os.path.join(DATA_DIR, "last_ui_state.json")
+        data = {"version": 1, "data": {}}
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f) or {}
+                if isinstance(loaded, dict):
+                    data = loaded
+            except Exception:
+                data = {"version": 1, "data": {}}
+        ui_data = data.get("data") if isinstance(data.get("data"), dict) else {}
+        # 保留 set_injection_settings 写入的 injection 段，UI 状态不得覆盖
+        saved_injection = ui_data.get("injection")
+        if isinstance(parsed, dict):
+            ui_data.update(parsed)
+        else:
+            ui_data = parsed
+        if saved_injection is not None:
+            ui_data["injection"] = saved_injection
+        data["data"] = ui_data
         with open(path, "w", encoding="utf-8") as f:
-            json.dump({"version": 1, "data": parsed}, f, ensure_ascii=False)
+            json.dump(data, f, ensure_ascii=False)
         return {"success": True, "path": path}
     except Exception as e:
         return {"success": False, "message": "save failed: " + str(e)}
@@ -1169,7 +1235,7 @@ def _call_llm(endpoint, api_key, model, prompt):
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.3,
-        "max_tokens": 4096,
+        "max_tokens": 16384,
     }).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers={
         "Content-Type": "application/json",
@@ -1208,8 +1274,9 @@ def analyze_chat(conn, params):
     if not endpoint or not api_key:
         return {"success": False, "message": "未配置 API Endpoint 或 Key"}
     # 总量截断：防止长对话把 LLM 上下文撑爆（每段截 500 后累计仍可能过大）
-    if len(chat_text) > 20000:
-        chat_text = chat_text[:20000] + "...（截断）"
+    if len(chat_text) > 12000:
+        # 前后各保留 6000：角色互动通常在对话尾部，只留头部会丢失角色卡内容
+        chat_text = chat_text[:10000] + "...（中段省略）..." + chat_text[-10000:]
 
     # 读取已有数据用于去重提示
     existing_summary = ""
@@ -1298,7 +1365,8 @@ def import_legacy_backup(conn, params):
         # 若是 ZIP，解压到临时目录
         if os.path.isdir(path):
             base = path
-        elif path.lower().endswith(".zip") and os.path.exists(path):
+        elif os.path.exists(path) and zipfile.is_zipfile(path):
+            # 按文件头识别 ZIP，不依赖 .zip 后缀（SAF/缓存路径可能无后缀）
             extracted_dir = tempfile.mkdtemp(prefix="engine_import_")
             with zipfile.ZipFile(path) as zf:
                 _safe_extract(zf, extracted_dir)
@@ -1538,6 +1606,7 @@ ACTIONS = {
     "deploy_status": deploy_status,
     "deploy_install": deploy_install,
     "deploy_restart": deploy_restart,
+    "sync_db": sync_db,
     "save_ui_state": save_ui_state,
     "trigger_analysis": trigger_analysis,
     "set_injection_settings": set_injection_settings,
@@ -1689,6 +1758,7 @@ def main():
             sys.stderr.write(msg + "\n")
         return
     server.db_path = args.db
+    _start_db_sync_loop()
     log("INFO", "worker v%s listening on %s, db=%s" % (VERSION, args.port, args.db))
     try:
         server.serve_forever()
