@@ -47,7 +47,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "2.0.0"
+VERSION = "2.0.17"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
