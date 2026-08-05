@@ -60,15 +60,22 @@ function render(ctx) {
     try {
       var raw = await ctx.callTool('memory_engine:diag_engine', {});
       var r = parseResult(raw);
+      // 读取前端诊断缓存（screen.js dbgUi 写入 DBG_UI_CACHE）
+      var frontCache = '';
+      try { frontCache = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e) {}
       if (r && r.success) {
-        diagState[1](r.diag || {});
+        var diag = r.diag || {};
+        diag.front_cache = frontCache;
+        diagState[1](diag);
         toast('诊断完成');
       } else {
-        diagState[1]({ error: ((r && r.message) || '诊断失败') });
+        diagState[1]({ error: ((r && r.message) || '诊断失败'), front_cache: frontCache });
         toast('诊断失败：' + ((r && r.message) || '未知错误'));
       }
     } catch (e) {
-      diagState[1]({ error: '诊断异常：' + (e.message || String(e)) });
+      var fc = '';
+      try { fc = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e2) {}
+      diagState[1]({ error: '诊断异常：' + (e.message || String(e)), front_cache: fc });
       toast('诊断异常：' + (e.message || String(e)));
     }
   }
@@ -185,6 +192,7 @@ function render(ctx) {
         if (dg.env && dg.env.py) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '环境: ' + String(dg.env.py).slice(0, 300), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
         if (dg.tmp_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + dg.tmp_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
         if (dg.engine_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: 'engine.log 尾部:\n' + dg.engine_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
+        if (dg.front_cache) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '前端诊断(DBG_UI_CACHE):\n' + dg.front_cache, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
         if (dg.messages && dg.messages.length) dgItems.push(UI.Text({ text: '诊断信息: ' + dg.messages.join('; '), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }));
         if (!dg.worker_up && !dg.tmp_log_tail && !dg.engine_log_tail && !(dg.messages && dg.messages.length)) dgItems.push(UI.Text({ text: '（无诊断数据）', style: 'labelSmall', color: colors.onSurfaceVariant }));
       }

@@ -115,8 +115,10 @@ var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
+var dbgRenderCount = (dbgRenderCount || 0) + 1;
   if (!initRef.current) {
  initRef.current = true;
+ dbgUi('init', '首次渲染，触发分析');
  // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
  analyzingState[1](false);
  // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
@@ -124,6 +126,7 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
    try {
      var raw = await ctx.callTool('memory_engine:trigger_analysis', {});
      var r = parseResult(raw);
+     dbgUi('init', 'trigger_analysis 返回 started=' + (r && r.started) + ' skipped=' + (r && r.skipped) + ' success=' + (r && r.success));
      if (r && r.started) {
        // 异步分析已启动 → 显示"分析中"并轮询刷新数据
        resultState[1]('🔄 检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析...');
@@ -183,6 +186,7 @@ var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
   // v2.1.0：时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
   var dataLoadedTs = Number(dataLoadedState[0] || 0);
   if ((!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) && !dataLoadScheduledRef.current) {
+    dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedTs + '）');
     dataLoadScheduledRef.current = true;
     setTimeout(function() {
       loadData().then(function(ok) {
@@ -282,10 +286,31 @@ loadingChatsState[1](false);
 }
 
   // ===== 动作函数 =====
+  // ===== 诊断探针：区分空加载类型（A=数据没返回 / B=返回但UI没更新 / C=初始化没执行）=====
+  var _dbgTs = 0;
+  // 环形缓冲写 env DBG_UI_CACHE（最多保留 40 行），deploy tab 诊断可读
+  function dbgUi(tag, info) {
+    try {
+      var now = Date.now();
+      var dt = _dbgTs ? (now - _dbgTs) : 0;
+      _dbgTs = now;
+      var line = new Date(now).toISOString().replace('T', ' ').slice(5, 19) +
+        ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
+      var old = '';
+      try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e) {}
+      var buf = old + line;
+      var lines = buf.split('\n');
+      if (lines.length > 40) lines = lines.slice(lines.length - 40);
+      try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e) {}
+    } catch (e) {}
+  }
+
   async function loadData() {
+    dbgUi('loadData', '触发');
     try {
       var raw = await ctx.callTool('memory_engine:load_life_data', {});
       var r = parseResult(raw);
+      dbgUi('loadData', '返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
       if (r && r.success) {
             dataState[1]({
                 events: r.extracted && r.extracted.events || [],
@@ -327,9 +352,11 @@ loadingChatsState[1](false);
   }
 
   async function loadScreenPersona() {
+    dbgUi('loadPersona', '触发');
     // v2.1.0：60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
     var pC = personaCacheRef.current || {};
     if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
+      dbgUi('loadPersona', '缓存命中 id=' + pC.id);
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(pC.id || ''));
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(pC.name || ''));
       var curC = screenPersonaState[0];
@@ -343,6 +370,7 @@ loadingChatsState[1](false);
       var pRaw = await ctx.callTool('memory_engine:list_characters', {});
       var pResult = parseResult(pRaw);
       var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
+      dbgUi('loadPersona', '返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
       var p = chars.length > 0
         ? { id: String(chars[0].id || ''), name: String(chars[0].name || ''), type: 'character_card' }
         : { id: '', name: '', type: '' };
@@ -361,6 +389,7 @@ loadingChatsState[1](false);
   }
 
   async function loadKnowledgeMemories() {
+    dbgUi('loadMem', '触发');
     memoryLoadingState[1](true);
     try {
       var personaRaw = await ctx.callTool('memory_engine:list_characters', {});
@@ -372,9 +401,11 @@ loadingChatsState[1](false);
         character_id: personaId || undefined
       });
       var result = parseResult(raw);
+      dbgUi('loadMem', '返回 success=' + (result && result.success) + ' memories=' + (result && result.memories ? result.memories.length : '无'));
       if (result && result.success) memoryState[1](result.memories || []);
       else resultState[1]('记忆读取失败：' + ((result && result.message) || '未知错误'));
     } catch(e) {
+      dbgUi('loadMem', '异常 ' + (e.message || String(e)));
       resultState[1]('记忆读取失败：' + (e.message || String(e)));
     }
     memoryLoadedState[1](Date.now());
