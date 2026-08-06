@@ -105,3 +105,19 @@ rm -rf /data/user/0/com.ai.assistance.operit/cache/*
 用户触发的 onClick / onValueChange 里的 setter 不构成渲染循环，可正常使用。
 
 **验证方法**：渲染体探针（mount 在函数入口、mount2 在 return 前）1:1 且每秒数百次 = 平台层循环；此时检查渲染体内是否调用了 setter。
+
+## 生命周期规则：模块级变量不可靠（CMS v1.7.1 探针实锤）
+
+来源：character-memory-system v1.7.1 探针（boot trig ×6、mount 序号每轮从 #1 重来）
+结论：Operit 每次挂载/重挂载可能重新 require 插件模块，**模块级变量（module scope）每次挂载都会重置**。
+
+- 不适合作为 boot 锁（__bootTrig 每次挂载失效，导致重复初始化）
+- 不适合作为缓存状态（跨挂载丢失）
+- 不适合作为防重入标志
+
+持久状态必须使用：
+- `ctx.setEnv / ctx.getEnv`（跨挂载/跨重启持久，但注意首帧渲染时可能未就绪）
+- 平台 storage / 文件存储
+- state store（useState 按 key 注册）
+
+与「render 无副作用」规则同等重要。
