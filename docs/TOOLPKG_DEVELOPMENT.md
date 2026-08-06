@@ -121,3 +121,12 @@ rm -rf /data/user/0/com.ai.assistance.operit/cache/*
 - state store（useState 按 key 注册）
 
 与「render 无副作用」规则同等重要。
+
+## 生命周期规则（追加）：Operit Tool 调用禁止并发依赖返回顺序
+
+- 实锤（v1.8.1 探针实验）：同一时间多个工具调用时，bridge 响应关联可能失效——
+  工具出口（内部写文件）100% 正确，前端入口收到错配响应（loadData 拿到 persona 响应、loadMem 拿到 loadData 响应、部分调用拿到 null）。
+- 证据：dbg_tool.log（工具直写）bytes 全对 vs dbg_ui.log（bridge 转发）bytes 错乱互相"借用"。
+- 规则：禁止 `Promise.all([toolA(), toolB(), toolC()])` 并发调用多个不同类型返回的工具；
+  推荐 `await toolA(); await toolB(); await toolC();` 串行，或聚合为单出口工具一次 complete。
+- 防御：响应字段校验必须存在（success=true 但缺关键字段如 extracted/memories → 视为错配 → 重试，不得当成功）。
