@@ -125,6 +125,10 @@ docs/
 - [x] P5 AI 自动提取角色四类记忆 + UI 性能优化（v2.1.0，见 CHANGELOG.md）
 - [x] P6 界面加载疑难问题（v2.1.7 已解决：两层初始化竞态 → 空加载/卡读取/未识别角色卡，见 docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md）
 - [ ] P7 剩余优化（P1-3 setEnv 兜底持久化、P1-4 缓存优先后台刷新、P1-5 requestId 防旧覆盖，见根因文档第五节）
+- [ ] P8 注入优化（v2.1.10，方案参考 https://github.com/liqiming-whu/character-memory-system）：
+  - ① 技术降权排序：注入拼装处按 importance 加权（high=1000/medium=500/low=100），标题或正文命中 `TECH_RE = /技术|调试|bug|报错|error|修复|配置|接口|API/` 再降 -60，开发记录类记忆沉底，人物/生活记忆优先浮出；
+  - ② snapshot 跨轮去重：worker `search_memories` 增加可选参数 `exclude_ids`；main.js 注入成功后按 chatId 记录本次注入的记忆 id 到 `memory_injection_history.json`，下次注入读取并传入 `exclude_ids`，同一会话已注入过的记忆不再重复注入（等价宿主 query_memory 的 snapshot_id 机制）。
+  - 设计边界（已确认，勿改）：**注入源保持 CME 自己 SQLite 为特性**，不做宿主记忆库注入；注入前去重维持字符串级（seenKeys），入库侧三级语义去重（精确 hash → 文本相似度 → 向量去重）已承担主责。
 
 ## 开发规范
 
