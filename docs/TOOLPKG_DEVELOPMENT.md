@@ -60,6 +60,8 @@ am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_REFRESH_PACKAGES --ez re
 - `Tools.Files.append` 不存在 → 用 `Tools.Files.write(path, content, true, 'android')`
 - manifest 的 `subpackages` 声明是 subpackage 注册的唯一入口（id + entry + enabled_by_default）
 - main.js 需导出 `registerToolPkg` / `onAppCreate`（Operit 旧版要求 `registerAppLifecycleHook` 模块级导出，新版兼容 API 注册）
+- **hook 处理函数必须模块级导出**（v2.1.9 实锤）：`registerPromptInputHook` 注册后，对应处理函数必须 `exports.onPromptInput = onPromptInput` 显式导出；漏导出会报 `Script error: registerPromptInputHook function must be exported from a toolpkg module` 导致**整包 Failed to parse toolpkg**（不只是该 hook 失效）
+- **包解析失败看 package log**（v2.1.9 实锤）：Operit 把包解析错误写到 `/sdcard/Download/Operit/packageLogs/` 下带时间戳的 log（如 `20260806_195921_997.log`），取最新一个直接看根因；logcat 里通常没有 ToolPkg 错误输出，别在 logcat 上浪费时间
 - pgrep 在 proot 可能不存在 → 进程检测用 `/proc` 遍历（`_find_worker_processes`）
 - Android 存储层 `.l2s` 懒写入会破坏 git 写对象 → `.git` 放 /root（ext4），工作区 gitfile 指向
 
