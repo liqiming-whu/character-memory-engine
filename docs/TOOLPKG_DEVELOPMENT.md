@@ -87,3 +87,21 @@ rm -rf /data/user/0/com.ai.assistance.operit/cache/*
 ```
 - **版本残留自检**：`find /sdcard/Download -name '*旧版本号*' | head` 应为空；`toolpkg_cache` 和 app cache 必须清空
 - **worker.py 同步部署**：改 worker 后需同步 `/root/character_memory_engine/worker.py` 并重启进程（`pkill -f 'character_memory_engine/worker.py'` + nohup 拉起）
+
+## Operit Compose DSL 铁律（v1.6.9 实战验证）
+
+> 来源：character-memory-system v1.6.8 定位的根因——render 阶段调用 state setter（即使写入相同值）会触发 XML 重建闭环：render -> setState -> 重渲染 -> 新 XML -> liveXmlContent 变化 -> LaunchedEffect 重启 -> 无限 remount（每秒数百次，整机卡死/闪退）。
+
+**Rule 1：render() 必须无副作用。**
+禁止在 render、UI 构造函数、节点生成阶段调用任何 state setter（`xxxState[1](...)`）、加载函数（`loadOnEnter()` 等）、文件写入。
+
+**Rule 2：数据同步只发生在 action / onLoad 生命周期。**
+数据由 screen 根 onLoad 加载（setTimeout 调度亦可），通过 props 传入子组件 render；render 只读 props 渲染。
+
+**Rule 3：子组件渲染体不反向修正 state。**
+父组件已传入的数据，子组件不得在渲染体里写回自己的 state（`personaState[1](personaFromScreen)` 这类同步是循环引信）。
+
+**Rule 4：事件回调内的 setState 安全。**
+用户触发的 onClick / onValueChange 里的 setter 不构成渲染循环，可正常使用。
+
+**验证方法**：渲染体探针（mount 在函数入口、mount2 在 return 前）1:1 且每秒数百次 = 平台层循环；此时检查渲染体内是否调用了 setter。
