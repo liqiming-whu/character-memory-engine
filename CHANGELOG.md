@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.1.7（2026-08-06，tab 切换 action 链窗口版）
+
+### tab 切换也保持 action 链窗口（源码级修复第二刀）
+- Operit 平台实锤：compose_dsl UI 是 **action 驱动渲染**——异步 setState（Promise/setTimeout 回调）只写 stateStore 不触发 UI 重绘；仅 action 分发期间（Promise pending）订阅 stateChange 实时推送
+- 修复：tab onClick（切到知识页/角色页）改为 async + 保持 600ms 窗口——覆盖 character.js 加载 / loadMem 的 setState 实时推送
+- 症状：切 tab 到角色页仍卡“正在读取”（v2.1.6 只覆盖了 onLoad 路径）
+### 实测（11:07-11:15，快速连切 8 次）
+- 所有 tab 切换渲染全程畅通，loadMem/loadPersona setState 全部窗口内推送
+- 进入角色页不再空载/卡读取；仅保留正常加载转圈（时间短，可接受）
+
+## v2.1.6（2026-08-06，onLoad action 链窗口版）
+
+### 源码级实锤：action 驱动渲染 + onLoad 保持窗口
+- 拉取 Operit 官方源码（JsComposeDslRuntimeScript.kt / JsComposeDslBridge.kt / ToolPkgComposeDslScreen.kt）实锤渲染机制：UI 树只在 ①初始渲染 ②action 分发 ③文本输入同步 ④显式 rerender 时重建
+- 异步 setState 只写 stateStore 不触发 UI 重绘；**action 分发期间（Promise pending）订阅 stateChange 实时推送**，action 完成后订阅取消
+- 修复：onLoad（本身是 action）恢复 `await loadData()` + 保持 600ms 窗口，让本帧所有异步 setState 落在订阅窗口内实时推送
+- 症状：v2.1.5 自驱重试数据层全恢复但 UI 不重绘（“正在读取”卡死）
+
+## v2.1.5（2026-08-06，失败自驱重试版）
+
+### 重试从“被动等 render”改为“失败自驱”
+- v2.1.4 暴露：render 驱动重试依赖下一次渲染（相同值 setState 不触发重渲染）→ 无用户操作则冻结
+- data 封装 `retryLoadData()`：失败在 finally 主动排队下一次（退避 300/600/1200/2400ms，最多 5 次，成功归零）
+- persona chars=0 无旧值自驱重试 5 次；memory 空壳且无缓存自驱重试 5 次
+- 实测发现数据层恢复但 UI 不重绘 → 触发源码级深挖（v2.1.6）
+
 ## v2.1.4（2026-08-06，P0-2 保险丝版）
 
 ### 失败重试保险丝（评估后轻量实施）

@@ -113,6 +113,8 @@ var initRef = ctx.useRef('init', false);
 var triggerPollRef = ctx.useRef('triggerPoll', 0);
 var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
   var dataLoadFailCountRef = ctx.useRef('dataLoadFailCount', 0);
+  var personaFailCountRef = ctx.useRef('personaFailCount', 0);
+  var memoryFailCountRef = ctx.useRef('memoryFailCount', 0);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
@@ -186,19 +188,32 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
   // 快速切换实例复用时残留 true 导致加载永久跳过。
   // v2.1.0：时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
   var dataLoadedTs = Number(dataLoadedState[0] || 0);
-  var _dataFail = Number(dataLoadFailCountRef.current || 0);
-  // v2.1.4 P0-2：失败退避 + 次数上限——连续 5 次失败停止自动重试（避免空壳竞态下高频空转）
-  if ((!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) && !dataLoadScheduledRef.current && _dataFail < 5) {
-    dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedTs + ' failCount=' + _dataFail + '）');
+  // v2.1.5 P0-2b：失败自驱重试——不再依赖 render 驱动（Operit 相同值 setState 不触发重渲染，
+  // 失败后若无用户操作会冻结在"正在读取"；失败时自排队下一次，成功或达上限才停止）
+  function retryLoadData() {
+    if (dataLoadScheduledRef.current) return;
+    var _f = Number(dataLoadFailCountRef.current || 0);
+    if (_f >= 5) return; // 连续 5 次失败停止自动重试
     dataLoadScheduledRef.current = true;
-    var _retryDelay = _dataFail === 0 ? 0 : Math.min(300 * Math.pow(2, _dataFail - 1), 3000);
+    var _rd = _f === 0 ? 0 : Math.min(300 * Math.pow(2, _f - 1), 3000);
+    dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedState[0] + ' failCount=' + _f + '）');
     setTimeout(function() {
       loadData().then(function(ok) {
-        dataLoadedState[1](ok ? Date.now() : 0); // 成功记时间戳；失败置 0 下帧重试
+        dataLoadedState[1](ok ? Date.now() : 0); // 成功记时间戳；失败置 0
         if (ok) { dataLoadFailCountRef.current = 0; }
         else { dataLoadFailCountRef.current = (dataLoadFailCountRef.current || 0) + 1; }
-      }).finally(function() { dataLoadScheduledRef.current = false; });
-    }, _retryDelay);
+      }).finally(function() {
+        dataLoadScheduledRef.current = false;
+        // 失败自驱：不等 render，主动排队下一次
+        var _f2 = Number(dataLoadFailCountRef.current || 0);
+        if (_f2 > 0 && _f2 < 5 && !Number(dataLoadedState[0] || 0)) {
+          retryLoadData();
+        }
+      });
+    }, _rd);
+  }
+  if (!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) {
+    retryLoadData();
   }
   // ===== 初始化时加载记忆 =====
   var currentTab = tabState[0];
@@ -412,6 +427,7 @@ loadingChatsState[1](false);
     var pC = personaCacheRef.current || {};
     if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
       dbgUi('loadPersona', 'req#' + rid + ' 缓存命中 id=' + pC.id);
+      personaFailCountRef.current = 0;
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(pC.id || ''));
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(pC.name || ''));
       var curC = screenPersonaState[0];
@@ -434,6 +450,12 @@ loadingChatsState[1](false);
           dbgUi('loadPersona', 'req#' + rid + ' chars=0 空壳：保留已有 persona id=' + _curSP0.id);
           return;
         }
+        // v2.1.5：无旧值场景——置空后自驱重试（不依赖 render，否则停在"正在读取"需手动重载/切 tab 才恢复）
+        personaFailCountRef.current = (personaFailCountRef.current || 0) + 1;
+        if (personaFailCountRef.current <= 5) {
+          dbgUi('loadPersona', 'req#' + rid + ' chars=0 无旧值：自驱重试 ' + personaFailCountRef.current + '/5');
+          setTimeout(function() { loadScreenPersona(); }, Math.min(300 * Math.pow(2, personaFailCountRef.current - 1), 3000));
+        }
       }
       var p = chars.length > 0
         ? { id: String(chars[0].id || ''), name: String(chars[0].name || ''), type: 'character_card' }
@@ -449,6 +471,7 @@ loadingChatsState[1](false);
       }
       // v2.1.0：不再主动查询角色记忆——避免每次切回都覆盖用户的分类选择；
       // 角色页列表由 character 组件内部按当前分类自行加载
+      personaFailCountRef.current = 0;
       personaCacheRef.current = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || ''), ts: Date.now() };
     } catch (e) {}
   }
@@ -489,6 +512,16 @@ loadingChatsState[1](false);
     var _cacheOk = memoryState[0] && memoryState[0].length > 0;
     memoryLoadedState[1]((_memsOk || _cacheOk) ? Date.now() : 0);
     memoryLoadingState[1](false);
+    // v2.1.5：空壳且无缓存时自驱重试（不依赖 render，避免冻结在"正在读取"）
+    if (!_memsOk && !_cacheOk) {
+      memoryFailCountRef.current = (memoryFailCountRef.current || 0) + 1;
+      if (memoryFailCountRef.current <= 5) {
+        dbgUi('loadMem', 'req#' + rid + ' 空壳无缓存：自驱重试 ' + memoryFailCountRef.current + '/5');
+        setTimeout(function() { loadKnowledgeMemories(); }, Math.min(300 * Math.pow(2, memoryFailCountRef.current - 1), 3000));
+      }
+    } else {
+      memoryFailCountRef.current = 0;
+    }
   }
   async function saveConfig() {
     await ctx.setEnv('MEMORY_SYSTEM_ENDPOINT', endpoint);
@@ -948,7 +981,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
   for (var ti = 0; ti < TAB_REGISTRY.length; ti++) {
     (function(t) {
       var isSel = currentTab === t.id;
-      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3) memoryLoadedState[1](0); } }, [
+      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: async function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3) memoryLoadedState[1](0); if (t.id === 3 || t.id === 4) { await new Promise(function(__res) { setTimeout(__res, 600); }); } } }, [
         UI.Column({ fillMaxWidth: true, fillMaxHeight: true, horizontalAlignment: 'center', verticalArrangement: 'center' }, [
           UI.Box({ fillMaxWidth: true, contentAlignment: 'center' }, [
             UI.Icon({ name: t.icon, tint: isSel ? colors.primary : colors.outline, size: 21 }),
@@ -1103,9 +1136,14 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
 
   // ===== 返回 =====
   return UI.Column({ fillMaxSize: true, padding: 8, onLoad: async function() {
-    // v2.1.0：loadData 已由 render 内 dataLoadedState 守卫调度，这里不再重复调用（避免每次进入两次 load_life_data）
-    // v2.1.4：loadScreenPersona 同样已由 render 内 characterLoadScheduledRef 调度（tab===4 时），
-    //         删除此处重复调用，消除 req#1/req#2 并发覆盖（"未识别角色卡"竞态来源）
+    // v2.1.6：action 链保持——Operit 平台异步 setState 默认不触发 UI 重建，
+    // 只有 action 分发期间（Promise pending）订阅 stateChange 并通过中间渲染实时推送。
+    // onLoad 本身是 action：await 关键加载 + 保持窗口，让本帧所有异步 setState 落在订阅窗口内。
+    if (!dataLoadScheduledRef.current && !Number(dataLoadedState[0] || 0)) {
+      try { await loadData(); } catch (__e) {}
+    }
+    // 保持 action 链窗口：覆盖 render 调度块触发的 persona/memory/角色页等异步加载的 setState 推送
+    await new Promise(function(__res) { setTimeout(__res, 600); });
   } }, [
     headerCard,
     UI.Spacer({ height: 6 }),

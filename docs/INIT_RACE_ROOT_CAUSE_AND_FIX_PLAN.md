@@ -1,9 +1,10 @@
 # 初始化竞态根因与修复计划（v2.1.2 实验实锤版）
 
-> 更新时间：2026-08-06 06:35
-> 状态：✅ 根因已实锤，修复方案已三方对齐，**待执行**
+> 更新时间：2026-08-06 19:20
+> 状态：✅ **P0 全部完成并验证通过（v2.1.3 ~ v2.1.7）**；剩余 P1 待后续迭代
 > 实验版本：v2.1.2（[mount] 实例创建探针 + globalThis 模块级渲染计数器）
-> 执行前提：休息充足后，按本文第六节顺序执行；P1 之前必须先做持久化通道验证实验
+> 执行结论：进入角色页不再空载/卡读取；正常加载转圈短暂保留（可接受）
+> 追加认知：v2.1.6/v2.1.7 源码级实锤 **Operit 是 action 驱动渲染**（见第五节末补充）
 
 ---
 
@@ -90,68 +91,58 @@ Operit 重启早期 hiddenExec / proot executor 会话竞态 → `onAppCreate` �
 
 ---
 
-## 五、修复方案（已对齐，待执行）
+## 五、修复方案（P0 已全部执行完毕）
 
-### P0（必须，先做）
+### P0 实施记录（v2.1.3 ~ v2.1.7，均已实测验证）
 
-**1. 禁止空结果覆盖已有数据（统一守卫）**
+| 版本 | 内容 | 验证结果 |
+|---|---|---|
+| v2.1.3 | 空覆盖守卫（data / persona / memory 三处） | 5 次进入 0 空覆盖 |
+| v2.1.4 | 重试保险丝（退避 + 上限 + memory 成功才写时间戳 + 消除 persona 并发） | 6 次进入 100% 拦截、persona 单请求 |
+| v2.1.5 | 失败自驱重试（不再依赖 render） | 数据层全恢复，但暴露 UI 不重绘 |
+| v2.1.6 | onLoad action 链窗口（源码级实锤后第一刀） | 直接进入角色页不再卡"正在读取" |
+| v2.1.7 | tab onClick 同样保持 action 链窗口 | 切 tab 渲染全通，不再卡读取 |
 
-所有加载（data / persona / memory）统一规则：
+### 源码级补充认知（v2.1.6/v2.1.7 实锤）
 
-```js
-if (result 为空 && oldState 非空) { 保留 oldState; return; }
-```
+**Operit compose_dsl UI 是 action 驱动渲染模型**（拉取官方源码 `JsComposeDslRuntimeScript.kt` / `JsComposeDslBridge.kt` / `ToolPkgComposeDslScreen.kt` 确认）：
 
-具体：
-- persona：`chars === 0` 直接 return，不 setPersona
-- data：`extracted=无` 时不清空 dataState
-- memory：空数组返回时不覆盖非空缓存
+- UI 树只在 ①初始渲染 ②action 分发 ③文本输入同步 ④显式 rerender 时重建
+- **异步 setState（Promise/setTimeout 回调）只写 stateStore，不触发 UI 重绘**
+- **action 分发期间（Promise pending）会订阅 stateChange → setState 触发"中间渲染"实时推送**；action 完成后订阅取消
+- 这解释了"点重载/切 tab（走 action 链）有效、自动加载卡死（setTimeout 不在 action 链）"
+- **修复模式：让关键加载进入 action 链窗口**（onLoad await + 600ms；tab onClick async + 600ms）
 
-**2. 探测式等待 + 失败重试（替代盲等）**
-
-- 进入页面先发轻量探测（如 loadMem），返回空壳则短间隔重试，直到返回非空或达上限
-- ⚠️ 实验实证：**延迟 5 秒后的首次调用仍可能返回空壳**（22:18:24 调度 → 22:18:29 才执行 → 仍返回空）——纯 setTimeout 盲等无效，必须**重试直到非空**
-
-### P1（随后）
+### P1 剩余项（待后续迭代）
 
 **3. 持久化关键状态（persona / dataLoadedTs / memory 缓存）**
-
-- ⚠️ **前置验证实验（30 秒，必须先做）**：确定 Operit 可靠的持久化通道
-  - 已知：useState key 持久化部分失效；setEnv 跨进程读不到（worker 独立进程）
-  - 实验：screen.js 写测试 key → 退出重进 → 读回，验证同进程内哪些通道可靠
-- 确定通道后再实施，避免返工
+- ✅ 前置验证已完成（代码分析结论）：dataState 跨实例恢复靠 `ctx.setEnv('CACHED_ALL_DATA')` 兜底；**setEnv/getEnv 同上下文同步可靠，useState key 跨实例持久化基本不可信** → P1-3 选型确定用 setEnv 兜底模式
+- 待实施：persona / dataLoadedTs / memory 也用 setEnv 兜底
 
 **4. 缓存优先 + 后台刷新（stale-while-revalidate）**
-
-- 进入 → 立即显示缓存（dataState 已验证跨实例保留 27e）→ 后台刷新 → 刷新失败保留缓存
-
 **5. requestId 防旧请求覆盖（防御性）**
-
-- 每次进入生成 requestId，回调携带；setState 前校验仍为最新请求，丢弃过期回调
-
-**6. 空缓存时 loading UI 兜底**
-
-- 首次进入无缓存时显示骨架屏 / "正在加载数据…"占位，避免裸空白
+**6. 空缓存时 loading UI 兜底**（正常加载转圈已天然兜底，可评估是否增强）
 
 ---
 
 ## 六、实施顺序与验收标准
 
-### 实施顺序
+### 实施顺序（✅ = 已完成并验证）
 
-1. **持久化通道验证实验**（30 秒，决定 P1 技术选型）
-2. P0-1 空覆盖守卫（data / persona / memory 三处）
-3. P0-2 探测式等待 + 失败重试
-4. P1-3 关键状态持久化（按验证结果选通道）
-5. P1-4 缓存优先 + 后台刷新
-6. P1-5 requestId + P1-6 loading UI 兜底
+1. ✅ **持久化通道验证**（代码分析完成，结论见五-3：setEnv 兜底模式）
+2. ✅ P0-1 空覆盖守卫（v2.1.3）
+3. ✅ P0-2 失败重试 + 保险丝（v2.1.4）+ 自驱重试（v2.1.5）
+4. ✅ 补充：action 链渲染窗口（v2.1.6 onLoad / v2.1.7 tab 切换）
+5. P1-3 关键状态持久化（setEnv 兜底，待实施）
+6. P1-4 缓存优先 + 后台刷新
+7. P1-5 requestId + P1-6 loading UI 兜底
 
-### 验收标准
+### 验收标准（当前达成情况）
 
-- 连续 10 次退出重进：白屏 / 未识别 / 假正在读取 = **0 次**
-- 空壳响应不再清空任何已有数据
-- worker 未启动 / 网络异常时：显示缓存 + 加载状态，**不白屏**
-- dbg_ui.log 中不再出现 `set dataState=空 | old dataState=27e` 类覆盖记录
+- 连续 10 次退出重进：白屏 / 未识别 / 假正在读取 = **0 次** —— ✅ 多次实测达成（仅保留正常加载转圈，时间短可接受）
+- 空壳响应不再清空任何已有数据 —— ✅ v2.1.3 实测 5 次 0 空覆盖
+- worker 未启动 / 网络异常时：显示缓存 + 加载状态，**不白屏** —— ✅（守卫 + 自驱重试 + 转圈兜底）
+- dbg_ui.log 中不再出现 `set dataState=空 | old dataState=27e` 类覆盖记录 —— ✅ 已无覆盖记录
 
 ---
 
