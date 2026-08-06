@@ -89,6 +89,16 @@ Operit 重启早期 hiddenExec / proot executor 会话竞态 → `onAppCreate` �
 
 > 升级认知：**不是 React 生命周期问题，而是 Operit JS Runtime 重载 + 工具初始化竞态 + 非可靠状态恢复 + 空结果覆盖。**
 
+### 两层竞态 → 症状 → 修复 全链路映射
+
+| 竞态层 | 机制 | 导致的 bug | 实施修复 | 验证 |
+|---|---|---|---|---|
+| 第一层：hiddenExec executor 会话竞态（v2.0.20） | Operit 重启早期创建坏会话，后续调用永久卡 | worker 不响应 → 界面转圈/卡死/ANR | `onAppCreate` 延迟 30s + `ensureWorkerUp` freshKey 自愈 | 重启后秒级拉起 |
+| 第二层：JS 模块重载 + 工具初始化竞态（v2.1.2 实锤） | 每次进入重载整个 JS 模块；新模块早期工具调用 2/3 概率返回"成功但空壳" | **空加载（白屏）**：空壳覆盖已有 dataState | v2.1.3 空壳守卫（空结果绝不覆盖非空） | 5 次进入 0 空覆盖 |
+| 叠加 1：空壳覆盖 + 并发乱序 | req#1 chars=0 先到覆盖 req#2 chars=2 | **"未识别角色卡"** | v2.1.3 守卫 + v2.1.4 消除 persona 并发 | 6 次进入 persona 单请求 |
+| 叠加 2：相同值 setState 不触发重渲染 | `dataLoadedState[1](0)` 相同值写入无 render | render 驱动重试冻结 | v2.1.5 失败自驱重试 | 数据层恢复（暴露 UI 层问题） |
+| 叠加 3：action 驱动渲染（v2.1.6 源码级实锤） | 异步 setState 只写 stateStore 不触发 UI 重绘 | **卡"正在读取"**（数据已恢复但 UI 不动） | v2.1.6 onLoad 窗口 + v2.1.7 tab 切换窗口（async + 600ms 保持订阅） | 直接进入/切 tab 均不再卡读取 |
+
 ---
 
 ## 五、修复方案（P0 已全部执行完毕）

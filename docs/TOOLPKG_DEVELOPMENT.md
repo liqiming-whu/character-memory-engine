@@ -34,7 +34,9 @@
 - **推荐策略（v2.0.17）**：固定 key 常量（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时（与调用方超时对齐；超时直接报错、不建新会话）；会话真被污染时重启 Operit 即恢复
 - **⚠️ 禁用 default 会话**：不传 executorKey 走 `default` 会话。default 被多个包共享，一旦被某包卡死命令污染 → 所有走 default 的命令都阻塞（探测时好时坏、命令假死都是这个症状）。必须用**自定义固定 key**（本项目用 `cme`）
 - **⚠️ Operit 重启早期 hiddenExec 会话竞态（v2.0.20）**：实测 Operit 重启后**数秒内**调用 hiddenExec 可能触发 executor 会话竞态，创建坏会话 → 后续所有调用永久卡 → 转圈 → ANR 闪退；`onAppCreate` 延迟 30s 是**保守兜底**（并非 Ubuntu 实际需要初始化这么久，数秒后即可正常拉起）。`ensureWorkerUp` 每次强制 `freshKey` 全新会话（坏会话绝不复用，自愈不依赖 Operit 重启）。症状：重启后立即卡死/闪退——先怀疑启动初期调用
-- **⚠️ 第二层竞态：UI 工具调用环境初始化（v2.1.2 实验实锤）**：Operit **每次进入插件界面会重新执行整个 JS 模块**（globalThis 计数器归零实证）；新模块执行早期的 `ctx.callTool` 约 2/3 概率返回"成功但空壳"响应（`success=true` 但 `extracted=无` / `chars=0`，2-23ms 快速返回，非真实查询失败）。已解决第一层（worker 拉起）不等于 UI 层就绪。防御：① 空结果绝不覆盖非空状态；② 探测式重试直到返回非空（纯 setTimeout 盲等无效——实测延迟 5s 后首次调用仍可能空壳）。详见 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`
+- **⚠️ 第二层竞态：UI 工具调用环境初始化（v2.1.2 实验实锤，v2.1.3~v2.1.7 已解决）**：Operit **每次进入插件界面会重新执行整个 JS 模块**（globalThis 计数器归零实证）；新模块执行早期的 `ctx.callTool` 约 2/3 概率返回"成功但空壳"响应（`success=true` 但 `extracted=无` / `chars=0`，2-23ms 快速返回，非真实查询失败）。已解决第一层（worker 拉起）不等于 UI 层就绪。防御已落地：① 空结果绝不覆盖非空状态（v2.1.3 守卫）；② 失败自驱重试直到返回非空（v2.1.5，纯 setTimeout 盲等无效——实测延迟 5s 后首次调用仍可能空壳）；③ action 链渲染窗口（v2.1.6/v2.1.7）。详见 `docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`
+- **⚠️ UI 渲染模型：action 驱动渲染（v2.1.6 源码级实锤）**：Operit compose_dsl UI 树只在 ①初始渲染 ②action 分发 ③文本输入同步 ④显式 rerender（`__operit_rerender_compose_dsl`）时重建。**异步 setState（Promise/setTimeout 回调）只写 stateStore，不触发 UI 重绘**；但 **action 分发期间（Promise pending）会订阅 stateChange → setState 触发"中间渲染"实时推送，action 完成后订阅取消**。症状：数据层全恢复但界面卡"正在读取"；"点重载/切 tab（走 action 链）有效、自动加载卡死（setTimeout 不在 action 链）"。修复模式：**让关键加载进入 action 链窗口**——onLoad/tab onClick 改为 async handler + `await 600ms` 保持订阅窗口（v2.1.6/v2.1.7）
+- **⚠️ 相同值 setState 不触发重渲染**：`dataLoadedState[1](0)` 这类相同值写入不会触发 render → 依赖 render 的重试机制会冻结（无用户操作则永不恢复）→ 必须失败自驱：失败后自行 setTimeout 排队下一次（v2.1.5 已验证）
 - **返回值解析**：hiddenExec 返回结构不稳定（string / stdout / data 对象均可能出现）→ 解析需覆盖 `stdout/output/body/result/text/data`，最后 `JSON.stringify` 兜底（曾因缺 data 处理导致 python 探测时好时坏）
 ### 4.5 bash 拼接大坑（`&;` 语法错误）
 - 脚本用 `.join('; ')` 拼接时，若某元素以 `&` 结尾、下一元素独立 → 生成 `... &; echo ...` → **bash 语法错误（rc=2），整个 eval 直接失败**，后台命令从未执行、无任何报错痕迹
@@ -68,8 +70,18 @@ cd /sdcard/Download/Operit/dev_package/Character-Memory-Engine
 zip -rq ../com-operit-character-memory-engine-v2.0.3.toolpkg . \
   -x '.git/*' -x '*.toolpkg' -x 'dist/*' -x '*.db' -x '*.db-wal' -x '*.db-shm' -x '*.log'
 
-# 安装
+# 安装（三处部署位，缺一不可）
 cp ../com-operit-character-memory-engine-v2.0.3.toolpkg \
-  /storage/emulated/0/Android/data/com.ai.assistance.operit/files/packages/
+  /sdcard/Download/Operit/packages/
+cp ../com-operit-character-memory-engine-v2.0.3.toolpkg \
+  /sdcard/Download/Operit/files/packages/
+cp ../com-operit-character-memory-engine-v2.0.3.toolpkg /sdcard/Download/
+
+# ⚠️ 部署铁律：清旧包 + 清缓存（否则 Operit 扫描可能加载旧版）
+rm -f /sdcard/Download/Operit/packages/*v2.0.2*.toolpkg   # 删除所有旧版本包
+rm -rf /data/user/0/com.ai.assistance.operit/files/toolpkg_cache/*
+rm -rf /data/user/0/com.ai.assistance.operit/cache/*
 # 重启 Operit 生效
 ```
+- **版本残留自检**：`find /sdcard/Download -name '*旧版本号*' | head` 应为空；`toolpkg_cache` 和 app cache 必须清空
+- **worker.py 同步部署**：改 worker 后需同步 `/root/character_memory_engine/worker.py` 并重启进程（`pkill -f 'character_memory_engine/worker.py'` + nohup 拉起）

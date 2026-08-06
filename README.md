@@ -27,7 +27,7 @@
 ```
 - 插件层：UI（compose_dsl）、subpackage 工具、ToolPkg 接入
 - Worker 层：常驻 HTTP 服务，数据库、检索、模型调用
-- 前端与 Worker 之间通过 HTTP 桥接通信，不依赖 Operit 终端环境（Android shell 无 python3）
+- 前端与 Worker 之间通过 HTTP 桥接通信（Worker 实际运行于 Operit 内置 proot Ubuntu，Python 3.12 可用；HTTP 桥接用于进程隔离与稳定性，不依赖 UI 侧终端环境）
 
 ### 数据目录（自包含）
 `/sdcard/Download/Operit/character_memory_engine/`
@@ -52,6 +52,24 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_REFRESH_PACKAGES --ez reactivate_active_packages true`
 
+## 当前版本（v2.1.7）：初始化竞态修复
+
+**修复目标**：Operit 前端"JS 模块重载 + 工具调用初始化竞态"导致的**空加载（白屏）/ 卡"正在读取" / "未识别角色卡"** 三类问题。
+
+**两层竞态**：
+1. **第一层（v2.0.20 已解决）**：Operit 重启早期 hiddenExec executor 会话竞态 → `onAppCreate` 延迟 30s + `ensureWorkerUp` freshKey 自愈
+2. **第二层（v2.1.3~v2.1.7 已解决）**：每次进入插件界面重新执行整个 JS 模块 + 新模块早期工具调用约 2/3 概率返回"成功但空壳" + useState key 部分持久化失效 + 空壳覆盖已有数据 + 并发乱序
+
+**已实施修复（按版本）**：
+- v2.1.3 空壳响应守卫（data / persona / memory 三处，空结果绝不覆盖非空状态）
+- v2.1.4 重试保险丝（退避 + 上限 + memory 成功才写时间戳 + 消除 persona 并发）
+- v2.1.5 失败自驱重试（不再依赖 render 触发）
+- v2.1.6/v2.1.7 **action 链渲染窗口**（源码级实锤：Operit compose_dsl 为 action 驱动渲染，异步 setState 默认不触发 UI 重绘；onLoad 与 tab 切换保持 600ms 订阅窗口实时推送）
+
+**验证结果**：连续多次退出重进 / 快速切 tab，0 次空载、0 次卡读取、0 次未识别角色卡；仅保留正常加载转圈（时间短，可接受）。
+
+完整排查历程、实验证据与修复细节见 [docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md](docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md)，版本记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 技术验证
 
 完整技术栈已在 Operit 内置 proot Ubuntu 24 环境验证通过：
@@ -74,8 +92,8 @@ nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine
 ### 工具链可行性（v2.1.0）
 完整链路跨平台验证通过：Operit 插件（UI/subpackage）→ HTTP 桥接 → Python worker（proot Ubuntu 24）→ SQLite。Android 真机 + Ubuntu 子系统双向可用，无需外部服务器。
 
-### 已知疑难（待解决，低优先级）
-- [ ] **界面加载优化**：未识别角色卡 / 正在读取 / 读取失败 / 界面数据未加载为空。现象：退出插件界面再进入时偶发；过一会儿/切 tab/重进可恢复。疑似 Operit 平台层（useState/useRef 跨重启持久化、onLoad 异步竞态、相同值 setState 不触发重渲染、工具调用调度层开销）。已做缓解（共享缓存/时间戳守卫/占位/自动重试），残余问题暂不深挖。详见 [CHANGELOG.md](CHANGELOG.md)。
+### 已知疑难（已解决）
+- [x] **界面加载优化（v2.1.7 已解决）**：未识别角色卡 / 正在读取卡住 / 空加载白屏。根因：**Operit 每次进入插件界面重新执行整个 JS 模块** + **新模块早期工具调用约 2/3 概率返回"成功但空壳"**（两层初始化竞态的第二层）；叠加 useState key 部分持久化失效、空壳覆盖已有数据、并发乱序。已实施修复：空壳守卫（v2.1.3）+ 重试保险丝（v2.1.4）+ 失败自驱重试（v2.1.5）+ **action 链渲染窗口**（v2.1.6/v2.1.7，源码级实锤 Operit 为 action 驱动渲染，异步 setState 默认不触发 UI 重绘）。详见 [docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md](docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md)。
 
 ## 项目结构
 
@@ -90,7 +108,12 @@ docs/
   WORKER_API.md            memory_engine 接口规范
   TECH_VALIDATION.md       P0 技术验证记录
   TOOLPKG_DEVELOPMENT.md   ToolPkg 集成协议与踩坑记录
+  INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md  初始化竞态根因与修复计划（两层竞态 → bug → 修复 全链路）
 ```
+### 相关文档路由
+- **初始化竞态根因与修复**：`docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md`（两层竞态实锤证据、导致的三个症状、v2.1.3~v2.1.7 修复记录、剩余 P1 项）
+- **ToolPkg 平台踩坑**：`docs/TOOLPKG_DEVELOPMENT.md`（Operit 集成协议、hiddenExec 会话、action 驱动渲染等平台特性）
+- **版本历史**：`CHANGELOG.md`
 
 ## 开发进度
 
@@ -100,7 +123,8 @@ docs/
 - [x] P3 插件接入（HTTP 桥接 + subpackage 工具 + 前端复用，真机全绿）
 - [x] P4 语义检索（sqlite-vec 向量召回 + 旧备份幂等导入）
 - [x] P5 AI 自动提取角色四类记忆 + UI 性能优化（v2.1.0，见 CHANGELOG.md）
-- [ ] P6 疑难界面加载问题（未识别角色卡/正在读取/空白，低优先级，Operit 平台层嫌疑）
+- [x] P6 界面加载疑难问题（v2.1.7 已解决：两层初始化竞态 → 空加载/卡读取/未识别角色卡，见 docs/INIT_RACE_ROOT_CAUSE_AND_FIX_PLAN.md）
+- [ ] P7 剩余优化（P1-3 setEnv 兜底持久化、P1-4 缓存优先后台刷新、P1-5 requestId 防旧覆盖，见根因文档第五节）
 
 ## 开发规范
 
