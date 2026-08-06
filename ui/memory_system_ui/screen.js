@@ -112,12 +112,14 @@ var totalChatsState = ctx.useState('msgs_totalChats', (uiBoot.totalChats !== und
 var initRef = ctx.useRef('init', false);
 var triggerPollRef = ctx.useRef('triggerPoll', 0);
 var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
+  var dataLoadFailCountRef = ctx.useRef('dataLoadFailCount', 0);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
-var dbgRenderCount = (dbgRenderCount || 0) + 1;
+var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC || 0) + 1); // v2.1.2实验：模块级计数器——同实例/同WebView内递增，整页重载才归1
   if (!initRef.current) {
  initRef.current = true;
+ dbgUi('mount', '实例创建 tab=' + (tabState[0] !== undefined ? tabState[0] : '?') + ' r=' + dbgRenderCount); // v2.1.2实验：组件实例创建标记（配合模块级计数器判断重建 vs 整页重载）
  dbgUi('init', '首次渲染，触发分析'); // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
  analyzingState[1](false);
  // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
@@ -184,14 +186,19 @@ var dbgRenderCount = (dbgRenderCount || 0) + 1;
   // 快速切换实例复用时残留 true 导致加载永久跳过。
   // v2.1.0：时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
   var dataLoadedTs = Number(dataLoadedState[0] || 0);
-  if ((!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) && !dataLoadScheduledRef.current) {
-    dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedTs + '）');
+  var _dataFail = Number(dataLoadFailCountRef.current || 0);
+  // v2.1.4 P0-2：失败退避 + 次数上限——连续 5 次失败停止自动重试（避免空壳竞态下高频空转）
+  if ((!dataLoadedTs || (Date.now() - dataLoadedTs) > 60000) && !dataLoadScheduledRef.current && _dataFail < 5) {
+    dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedTs + ' failCount=' + _dataFail + '）');
     dataLoadScheduledRef.current = true;
+    var _retryDelay = _dataFail === 0 ? 0 : Math.min(300 * Math.pow(2, _dataFail - 1), 3000);
     setTimeout(function() {
       loadData().then(function(ok) {
         dataLoadedState[1](ok ? Date.now() : 0); // 成功记时间戳；失败置 0 下帧重试
+        if (ok) { dataLoadFailCountRef.current = 0; }
+        else { dataLoadFailCountRef.current = (dataLoadFailCountRef.current || 0) + 1; }
       }).finally(function() { dataLoadScheduledRef.current = false; });
-    }, 0);
+    }, _retryDelay);
   }
   // ===== 初始化时加载记忆 =====
   var currentTab = tabState[0];
@@ -333,6 +340,30 @@ loadingChatsState[1](false);
       var r = parseResult(raw);
       dbgUi('loadData', 'req#' + rid + ' 返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
       if (r && r.success) {
+            // v2.1.3 P0-1：空壳响应守卫（实验实锤：新模块早期工具调用约 2/3 概率返回 success=true 但 extracted 为空）
+            // 空壳 + 已有数据 → 保留旧数据，绝不覆盖（白屏直接元凶）
+            var _ext = r.extracted;
+            var _isEmpty = !_ext || (
+              !(_ext.events && _ext.events.length) &&
+              !(_ext.todos && _ext.todos.length) &&
+              !(_ext.contacts && _ext.contacts.length) &&
+              !(_ext.info && _ext.info.length) &&
+              !(_ext.finance && _ext.finance.length) &&
+              !(_ext.menstrual && _ext.menstrual.length)
+            );
+            var _oldD = dataState[0];
+            var _oldHas = !!(_oldD && (
+              ((_oldD.events && _oldD.events.length) || 0) +
+              ((_oldD.todos && _oldD.todos.length) || 0) +
+              ((_oldD.contacts && _oldD.contacts.length) || 0) +
+              ((_oldD.info && _oldD.info.length) || 0) +
+              ((_oldD.finance && _oldD.finance.length) || 0) +
+              ((_oldD.menstrual && _oldD.menstrual.length) || 0)
+            ) > 0);
+            if (_isEmpty && _oldHas) {
+              dbgUi('loadData', 'req#' + rid + ' 空壳响应：保留已有数据（不清空）');
+              return false;
+            }
             var newData = {
                 events: r.extracted && r.extracted.events || [],
                 contacts: r.extracted && r.extracted.contacts || [],
@@ -396,6 +427,14 @@ loadingChatsState[1](false);
       var pResult = parseResult(pRaw);
       var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
       dbgUi('loadPersona', 'req#' + rid + ' 返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
+      // v2.1.3 P0-1：空壳响应守卫——chars=0 且已有非空 persona 时保留旧值（"未识别角色卡"直接元凶）
+      if (!chars || chars.length === 0) {
+        var _curSP0 = screenPersonaState[0];
+        if (_curSP0 && _curSP0.id) {
+          dbgUi('loadPersona', 'req#' + rid + ' chars=0 空壳：保留已有 persona id=' + _curSP0.id);
+          return;
+        }
+      }
       var p = chars.length > 0
         ? { id: String(chars[0].id || ''), name: String(chars[0].name || ''), type: 'character_card' }
         : { id: '', name: '', type: '' };
@@ -430,18 +469,27 @@ loadingChatsState[1](false);
       var result = parseResult(raw);
       dbgUi('loadMem', 'req#' + rid + ' 返回 success=' + (result && result.success) + ' memories=' + (result && result.memories ? result.memories.length : '无'));
       if (result && result.success) {
-        dbgState('memoryState', result.memories || [], memoryState[0]);
-        memoryState[1](result.memories || []);
+        // v2.1.3 P0-1：空壳响应守卫——返回空数组且已有记忆时保留旧缓存（不覆盖）
+        var _mems = result.memories || [];
+        var _oldM = memoryState[0];
+        if (_mems.length === 0 && _oldM && _oldM.length > 0) {
+          dbgUi('loadMem', 'req#' + rid + ' 空壳响应：保留已有记忆 ' + _oldM.length + ' 条');
+        } else {
+          dbgState('memoryState', _mems, _oldM);
+          memoryState[1](_mems);
+        }
       }
       else resultState[1]('记忆读取失败：' + ((result && result.message) || '未知错误'));
     } catch(e) {
       dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (e.message || String(e)));
       resultState[1]('记忆读取失败：' + (e.message || String(e)));
     }
-    memoryLoadedState[1](Date.now());
+    // v2.1.4 P0-2：成功才写时间戳（空壳且无缓存时置 0，与 data 同款自动重试闭环）
+    var _memsOk = result && result.success && (result.memories || []).length > 0;
+    var _cacheOk = memoryState[0] && memoryState[0].length > 0;
+    memoryLoadedState[1]((_memsOk || _cacheOk) ? Date.now() : 0);
     memoryLoadingState[1](false);
   }
-
   async function saveConfig() {
     await ctx.setEnv('MEMORY_SYSTEM_ENDPOINT', endpoint);
     await ctx.setEnv('MEMORY_SYSTEM_KEY', apiKey);
@@ -1056,7 +1104,8 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
   // ===== 返回 =====
   return UI.Column({ fillMaxSize: true, padding: 8, onLoad: async function() {
     // v2.1.0：loadData 已由 render 内 dataLoadedState 守卫调度，这里不再重复调用（避免每次进入两次 load_life_data）
-    await loadScreenPersona();
+    // v2.1.4：loadScreenPersona 同样已由 render 内 characterLoadScheduledRef 调度（tab===4 时），
+    //         删除此处重复调用，消除 req#1/req#2 并发覆盖（"未识别角色卡"竞态来源）
   } }, [
     headerCard,
     UI.Spacer({ height: 6 }),

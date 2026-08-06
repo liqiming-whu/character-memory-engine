@@ -1,5 +1,28 @@
 # Changelog
 
+## v2.1.4（2026-08-06，P0-2 保险丝版）
+
+### 失败重试保险丝（评估后轻量实施）
+- data 调度失败退避：连续失败延迟按 `0/300/600/1200/2400ms` 递增；**连续 5 次失败停止自动重试**（避免空壳竞态下高频空转）；成功归零
+- sched 探针增加 `failCount=` 输出，可观测重试状态
+- loadKnowledgeMemories 改为**成功才写时间戳**（空壳且无缓存时置 0，与 data 同款自动重试闭环；此前失败也写时间戳导致记忆区空等 60 秒）
+- 删除 onLoad 中重复的 `loadScreenPersona()`（已由 render 内 characterLoadScheduledRef 调度）——**消除 req#1/req#2 并发覆盖**（"未识别角色卡"竞态来源）
+
+### 实测（6 次进入，09:36-09:37）
+- 空壳 100% 拦截，0 次空覆盖，dataState 全程 27e
+- persona 全程单请求（req#2 消失），chars=0 → 重试 → chars=2 恢复
+- failCount 0→1→成功归零，无高频空转
+
+## v2.1.3（2026-08-06，P0-1 空覆盖守卫版）
+
+### 空壳响应守卫（根因实锤后第一刀）
+- loadData：`extracted` 为空 **且** 已有数据 → 保留旧数据，返回 false（白屏直接元凶）
+- loadScreenPersona：`chars=0` **且** 已有 persona → 保留旧值，return（"未识别角色卡"直接元凶）
+- loadKnowledgeMemories：返回空数组 **且** 已有记忆 → 保留旧缓存
+
+### 实测（5 次进入，09:24-09:25）
+- 5 次空壳全部拦截，0 次空覆盖；守卫 return false → dataLoadedTs 未写 → 现有调度器自动重试 → 全部一次重试成功
+
 ## v2.1.2（2026-08-06，诊断实验版）
 
 ### mount/unmount 实验（根因实锤）
