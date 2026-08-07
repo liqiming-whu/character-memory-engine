@@ -792,9 +792,10 @@ loadingChatsState[1](false);
     clearTimeout(analyzeTimer);
     analyzingState[1](false);
   }
-  async function deleteItem(category, index) {
+  async function deleteItem(category, idOrIndex) {
     try {
-      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, index: index });
+      // v2.3.0：前端统一传条目 id（精确删除）；worker 优先按 id 定位，不再依赖 index
+      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
       if (parseResult(raw) && parseResult(raw).success) {
         await loadData();
         resultState[1]('✅ 已删除');

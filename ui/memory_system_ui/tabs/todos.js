@@ -26,9 +26,10 @@ function render(ctx, allData, states, actions) {
   var completedTodos = filteredTodos.filter(function(t) { return t.completed; });
 
   // 切换待办
-  async function toggleTodoItem(idx) {
+  async function toggleTodoItem(idOrIndex) {
     try {
-      var raw = await ctx.callTool('memory_engine:toggle_todo', { index: idx });
+      // v2.3.0：前端统一传待办 id（精确勾选），不再依赖 index
+      var raw = await ctx.callTool('memory_engine:toggle_todo', { id: idOrIndex });
       if (parseResult(raw) && parseResult(raw).success) {
         await actions.loadData();
       }
