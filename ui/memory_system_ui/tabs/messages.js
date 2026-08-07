@@ -238,7 +238,7 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
       return (function() {
         var _asyncAnalyze = function() {
           if (actions.setLoading) actions.setLoading(true);
-          return ctx.callTool('memory_system:analyze_saved_messages', { chat_id: targetChatId }).then(function(raw) {
+          return ctx.callTool('memory_engine:analyze_chat', { chat_id: targetChatId }).then(function(raw) {
             var r = parseResult(raw);
             if (r && r.success) {
               if (actions.showToast) actions.showToast('分析完成！');
@@ -339,9 +339,9 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
         if (actions.setLoading) actions.setLoading(false);
         return;
       }
-      return ctx.callTool('memory_system:analyze_saved_messages', {
-        chat_id: chat.chatId,
-        message_indices: JSON.stringify(selectedMessagesState)
+      // memory_engine:analyze_chat 分析整段对话（不支持片段过滤，worker 语义去重）
+      return ctx.callTool('memory_engine:analyze_chat', {
+        chat_id: chat.chatId
       }).then(function(raw) {
         var r = parseResult(raw);
         if (r && r.success) {
@@ -456,9 +456,9 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
                   var targetIdx = idx;
                   if (actions.setLoading) actions.setLoading(true);
                   // 异步 action 必须返回 Promise（否则 await 后的 setState 脱离渲染窗口，UI 不刷新）
-                  return ctx.callTool('memory_system:analyze_saved_messages', {
-                    chat_id: targetChatId,
-                    message_index: targetIdx
+                  // memory_engine:analyze_chat 分析整段对话（不支持单条过滤，worker 语义去重）
+                  return ctx.callTool('memory_engine:analyze_chat', {
+                    chat_id: targetChatId
                   }).then(function(raw) {
                     var r = parseResult(raw);
                     if (r && r.success) {
