@@ -1423,6 +1423,10 @@ def import_legacy_backup(conn, params):
             for item in rows:
                 # 前端字段直接作为 create_memory 参数（worker 做字段映射 + 去重）
                 p = dict(item)
+                # v1.8.5：旧备份子标题存在 category 字段（如"凭证""用户习惯"），
+                # 覆盖大类前先保留为 title，避免导入后信息栏丢失分类标题
+                if p.get("category") and p["category"] != cat and not p.get("title"):
+                    p["title"] = p["category"]
                 p["category"] = cat
                 if character_id:
                     p["character_id"] = character_id
