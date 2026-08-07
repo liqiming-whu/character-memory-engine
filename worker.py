@@ -825,9 +825,10 @@ def delete_life_item(conn, params):
     mid = params.get("id")  # 优先按 id 精确删除（前端已改传 id，根治 index 错位）
     character_id = params.get("character_id")
     if mid is not None:
+        # id 全局唯一，按 id 精确删除（不加 category 条件——前端分类与库中分类不一致会误报 not found）
         cur = conn.execute(
-            "UPDATE memories SET is_deleted=1 WHERE id=? AND category=? AND is_deleted=0",
-            (mid, category),
+            "UPDATE memories SET is_deleted=1 WHERE id=? AND is_deleted=0",
+            (mid,),
         )
         conn.commit()
         if cur.rowcount > 0:
