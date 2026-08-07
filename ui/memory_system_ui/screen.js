@@ -371,7 +371,22 @@ loadingChatsState[1](false);
   var reqIdCounter = { data: 0, persona: 0, mem: 0 };
   function nextReqId(kind) { reqIdCounter[kind] = (reqIdCounter[kind] || 0) + 1; return reqIdCounter[kind]; }
 
+  // v2.2.3：loadData 防抖——高频操作（连续删除/勾选/切换）300ms 内合并为一次全量拉取，
+  // 避免每次操作都触发全量请求 + Operit 全量重绘（UI 卡顿根源：1 分钟 45+ 次渲染）
+  var _loadDataTimer = null;
+  var _loadDataPending = null;
   async function loadData() {
+    if (_loadDataTimer) return _loadDataPending;
+    _loadDataPending = new Promise(function(__resolve) {
+      _loadDataTimer = setTimeout(function() {
+        _loadDataTimer = null;
+        _loadDataPending = null;
+        _loadDataImpl().then(__resolve);
+      }, 300);
+    });
+    return _loadDataPending;
+  }
+  async function _loadDataImpl() {
     var rid = nextReqId('data');
     dbgUi('loadData', 'req#' + rid + ' 触发');
     try {
