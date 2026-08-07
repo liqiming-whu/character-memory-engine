@@ -1,5 +1,14 @@
 # Character Memory Engine 开发计划
 
+## 0. 文档路由（主入口，2026-08-08 确立）
+| 文档 | 用途 | 位置 |
+|---|---|---|
+| 高级记忆能力优化计划（自改进/记忆质量路线图） | ChatGPT 制定，2026-08-08 审查入档。P0-P4：分析链路稳定性与记忆质量、记忆准入与更新、自更新系统、主动召回、Skill 自更新；分析水位线问题根因已实证、排期 v2.3.1（该文档 4.2 小节） | `docs/CME_高级记忆能力优化计划.md` |
+| 渲染风暴平台分析（已收尾） | 连续删除/快速切 tab 渲染风暴：实验过程/稳定复现/依据/原因；验收标准=不报错不闪退，停止极限性能优化 | `docs/RENDER_STORM_PLATFORM_ANALYSIS.md` |
+| 开发规范 | 异步 action 返回 Promise、渲染闭包禁 I/O 等铁律 | `docs/DEVELOPMENT_GUIDELINES.md` |
+
+---
+
 ## 1. 项目定位
 
 Character Memory Engine 是为Operit平台开发的独立的角色长期记忆引擎。
