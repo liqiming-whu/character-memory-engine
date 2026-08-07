@@ -235,10 +235,10 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
     // 定义分析函数
     var analyzeChat = function() {
       var targetChatId = chat.chatId;
-      (function() {
+      return (function() {
         var _asyncAnalyze = function() {
           if (actions.setLoading) actions.setLoading(true);
-          ctx.callTool('memory_system:analyze_saved_messages', { chat_id: targetChatId }).then(function(raw) {
+          return ctx.callTool('memory_system:analyze_saved_messages', { chat_id: targetChatId }).then(function(raw) {
             var r = parseResult(raw);
             if (r && r.success) {
               if (actions.showToast) actions.showToast('分析完成！');
@@ -251,7 +251,7 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
             if (actions.setLoading) actions.setLoading(false);
           });
         };
-        _asyncAnalyze();
+        return _asyncAnalyze();
       })();
     };
 
@@ -339,7 +339,7 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
         if (actions.setLoading) actions.setLoading(false);
         return;
       }
-      ctx.callTool('memory_system:analyze_saved_messages', {
+      return ctx.callTool('memory_system:analyze_saved_messages', {
         chat_id: chat.chatId,
         message_indices: JSON.stringify(selectedMessagesState)
       }).then(function(raw) {
