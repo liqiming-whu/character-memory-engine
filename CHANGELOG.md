@@ -1,4 +1,28 @@
 # Changelog
+## v2.3.0（2026-08-08，渲染性能大修 + 删除链路最终闭环）
+### 性能：渲染风暴 I/O 归零（dbgUi 限频 500ms，`89076ea`）
+- **现象**：连续切 tab / 连续删除时 UI 卡死（实测 13 秒 21 次渲染，每次渲染发 1 次 log_ui 工具调用 + 1 次 setEnv，工具调用往返又触发状态变化 → 恶性循环）
+- **根因**（对比 CMS v1.8.4 实证）：Operit 每次 setState 全量重绘本身不卡，卡的是渲染闭包内埋的 I/O（工具调用 + setEnv）——每次渲染 1 次工具调用是风暴放大器
+- **修复**：dbgUi 工具调用与 env 环形缓冲均限频 500ms（渲染风暴时 ≤2 次/秒），关键事件日志能力保留
+### 性能：loadData 300ms 防抖（`fc4e7b4`）
+- 高频删除/勾选/切换时合并全量拉取，消除 Operit 全量重绘风暴（实测 1 分钟 45+ 次渲染导致 UI 卡顿）
+### 性能：loadPersona 缓存命中 5 秒节流（`c419de9`）
+- 连切角色页避免反复 setEnv/setState 开销
+### 修复：删除链路本地即时移除 + loadMem 300ms 防抖（`220bf35`）
+- `deleteItem`/`deleteMemory` 成功或失败都先本地移除该行——连点不再命中过期行报 memory not found（实测每个 id 被连点 4 次）
+- `loadKnowledgeMemories` 加 300ms 防抖——连续删除合并刷新，消除 loadMem 排队 1-6 秒
+- `dropMemoryFromCache` 修复为按 id 优先（原按 title 比较但调用传 id，not found 时删不掉）
+### 修复：两段式确认用 useRef 做权威判断（`eeaec1d`）
+- Operit 渲染器偶发不重绘导致 onClick 闭包读到旧 state，确认态丢失看起来像 UI 卡住；加 5 秒确认态超时防残留
+### 修复：角色页防重入锁（`c107acf` → `d8f0bde` → `220d777`）
+- 先按 id 精确拦截（修复全局 2 秒锁误拦快速点不同条目），后按用户要求整体移除并改两段式确认；补漏声明 `__cmeDeleteLockId`（严格模式 is not defined）
+### 修复：空数据显示空态（`d8f0bde`）
+- `loadForPersona` 区分「查询成功但为空」（显示 0 条）与「查询失败」（才显示读取失败 + 重试）
+### 打包：修复 .toolpkg 缺 embed.py/models（2026-08-08）
+- `debug_install_toolpkg` 目录打包漏 manifest resources 里的 python 资源（embed.py/models 不在包内，Operit 启动扫描报 `Cannot find resource path 'embed.py'`）
+- 规范：手动 `zip -r 输出.toolpkg . -x '*.git*' -x '__pycache__/*' -x '*.pyc'` 打包，再 archive 方式烧录
+### 下版本预告：v2.3.1 优先解决自动分析水位线问题
+- 根因已实证：main.js onPromptFinalize 每次消息发送时整写 trigger.json（仅 5 字段）→ 清空 `watermarks`/`lastAnalyzedAt` → 水位线周期性丢失 → 打开插件时永远全量分析
 
 ## v2.2.2（2026-08-07，删除刷新根因闭环 + 全前端异步 action 规范修复）
 
