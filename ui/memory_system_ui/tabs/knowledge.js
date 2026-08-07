@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 
 const shared = require("../shared");
-const { multiMatch, parseResult } = shared;
+const { multiMatch, parseResult, fmtErr } = shared;
 const theme = require("../theme");
 
 // ===== Tab 3: 知识 =====

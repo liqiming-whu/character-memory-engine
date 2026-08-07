@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 
 const shared = require("../shared");
-const { getTypeColor, getTypeIcon, inDateRange, multiMatch, pad2 } = shared;
+const { getTypeColor, getTypeIcon, inDateRange, multiMatch, pad2, fmtErr } = shared;
 const theme = require("../theme");
 
 // ===== Tab 2: 时间线 =====

@@ -3,7 +3,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.default = Screen;
 
 const shared = require("./shared");
-const { relationMap, parseResult, pad2 } = shared;
+const { relationMap, parseResult, pad2, fmtErr } = shared;
 const theme = require("./theme");
 const overviewTab = require("./tabs/overview");
 const todosTab = require("./tabs/todos");
@@ -200,7 +200,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
        // 没有新内容：静默（也可选显示一句提示）
        resultState[1]('✅ 无新对话内容 (' + (r.lastAnalyzedAt ? '上次分析：' + new Date(r.lastAnalyzedAt).toLocaleString() : '首次检测') + ')');
      } else if (r && !r.success) {
-       resultState[1]('⚠️ 检测失败：' + (r.message || r.error || '未知'));
+       resultState[1]('⚠️ 检测失败：' + (fmtErr(r.message || r.error || '未知')));
      }
    } catch(e) {}
  })();
@@ -550,10 +550,10 @@ loadingChatsState[1](false);
           try { ctx.setEnv('CACHED_MEMORIES', JSON.stringify(_mems)); } catch(ex) {}
         }
       }
-      else resultState[1]('记忆读取失败：' + ((result && result.message) || '未知错误'));
+      else resultState[1]('记忆读取失败：' + (fmtErr((result && result.message) || '未知错误')));
     } catch(e) {
-      dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (e.message || String(e)));
-      resultState[1]('记忆读取失败：' + (e.message || String(e)));
+      dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (fmtErr(e.message || String(e))));
+      resultState[1]('记忆读取失败：' + (fmtErr(e.message || String(e))));
     }
     // v2.1.4 P0-2：成功才写时间戳（空壳且无缓存时置 0，与 data 同款自动重试闭环）
     var _memsOk = result && result.success && (result.memories || []).length > 0;
@@ -607,12 +607,12 @@ loadingChatsState[1](false);
         resultState[1]('✅ 记忆注入设置已保存');
       } else {
         injectionState[1](current);
-        resultState[1]('❌ ' + ((r && r.message) || '注入设置保存失败'));
+        resultState[1]('❌ ' + (fmtErr((r && r.message) || '注入设置保存失败')));
       }
     } catch (e) {
       if (seq !== injectionSaveSeqRef.current) return;
       injectionState[1](current);
-      resultState[1]('❌ ' + (e.message || String(e)));
+      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
     }
   }
 
@@ -646,10 +646,10 @@ loadingChatsState[1](false);
         injectionLimitInputState[1](String(r.injection.maxMemories));
         resultState[1]('✅ 注入记忆条数已保存');
       } else {
-        resultState[1]('❌ ' + ((r && r.message) || '注入记忆条数保存失败'));
+        resultState[1]('❌ ' + (fmtErr((r && r.message) || '注入记忆条数保存失败')));
       }
     } catch (e) {
-      resultState[1]('❌ ' + (e.message || String(e)));
+      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
     }
     injectionSavingState[1](false);
   }
@@ -665,10 +665,10 @@ loadingChatsState[1](false);
       if (r && r.success) {
         backupResultState[1]('✅ 备份已导出：' + (r.fileName || '') + '\n路径：' + (r.path || ''));
       } else {
-        backupResultState[1]('❌ ' + ((r && r.message) || '导出失败'));
+        backupResultState[1]('❌ ' + (fmtErr((r && r.message) || '导出失败')));
       }
     } catch (e) {
-      backupResultState[1]('❌ ' + (e.message || String(e)));
+      backupResultState[1]('❌ ' + (fmtErr(e.message || String(e))));
     }
     backupBusyState[1](false);
   }
@@ -719,7 +719,7 @@ loadingChatsState[1](false);
           backupResultState[1]('✅ 恢复完成（' + (res.mode || 'merge') + ' 模式' + (res.fileCount !== undefined ? '，' + res.fileCount + ' 个文件' : '') + '）');
           await loadData();
         } else {
-          backupResultState[1]('❌ ' + ((res && res.message) || '恢复失败'));
+          backupResultState[1]('❌ ' + (fmtErr((res && res.message) || '恢复失败')));
         }
       } else {
         // 新格式校验失败：尝试旧版本（v1.5.x）数据导入（data/<cat>.json 结构）
@@ -739,7 +739,7 @@ loadingChatsState[1](false);
         }
       }
     } catch (e) {
-      backupResultState[1]('❌ ' + (e.message || String(e)));
+      backupResultState[1]('❌ ' + (fmtErr(e.message || String(e))));
     }
     backupBusyState[1](false);
   }
@@ -779,7 +779,7 @@ loadingChatsState[1](false);
         var st = r.stats || {};
         resultState[1]('✅ 分析完成：提取 ' + (st.items || 0) + ' 条（合并 ' + (st.deduped || 0) + ' 条重复）');
       } else {
-        resultState[1]((r && r.message) || '❌ 分析失败');
+        resultState[1](fmtErr((r && r.message) || '❌ 分析失败'));
       }
       // v2.1.0：分析结束（成功/失败）标记全局时间戳，角色页下次进入强制刷新最新数据
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
@@ -799,7 +799,7 @@ loadingChatsState[1](false);
         resultState[1]('✅ 已删除');
       }
     } catch(e) {
-      resultState[1]('❌ ' + (e.message || String(e)));
+      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
     }
   }
 

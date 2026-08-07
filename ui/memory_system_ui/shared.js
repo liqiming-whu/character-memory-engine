@@ -66,6 +66,15 @@ function inDateRange(timestamp, start, end) {
 
 // ===== 共用：补零 =====
 function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+// ===== 共用：错误消息格式化 =====
+// 工具未启用/未导入类错误（not found）追加引导文案，其余原样返回
+function fmtErr(msg) {
+  var s = String(msg || '未知错误');
+  if (/not\s*found/i.test(s) || /No\s*tool/i.test(s)) {
+    return s + '，请在配置中启用';
+  }
+  return s;
+}
 
 // ===== 共用：解析结果 =====
 function parseResult(r) {
@@ -87,3 +96,4 @@ exports.multiMatch = multiMatch;
 exports.inDateRange = inDateRange;
 exports.pad2 = pad2;
 exports.parseResult = parseResult;
+exports.fmtErr = fmtErr;

@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 
 const shared = require("../shared");
-const { parseResult } = shared;
+const { parseResult, fmtErr } = shared;
 const theme = require("../theme");
 
 // ===== Token 估算（简单字符数估算，中文约2字符/词）=====
@@ -243,11 +243,11 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
             if (r && r.success) {
               if (actions.showToast) actions.showToast('分析完成！');
             } else {
-              if (actions.showToast) actions.showToast('分析失败: ' + (r ? r.message : '未知错误'));
+              if (actions.showToast) actions.showToast('分析失败: ' + fmtErr(r ? r.message : '未知错误'));
             }
             if (actions.setLoading) actions.setLoading(false);
           }).catch(function(e) {
-            if (actions.showToast) actions.showToast('分析出错');
+            if (actions.showToast) actions.showToast('分析出错：' + fmtErr((e && e.message) || String(e)));
             if (actions.setLoading) actions.setLoading(false);
           });
         };
@@ -347,11 +347,11 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
         if (r && r.success) {
           if (actions.showToast) actions.showToast('批量分析完成！');
         } else {
-          if (actions.showToast) actions.showToast('分析失败: ' + (r ? r.message : '未知错误'));
+          if (actions.showToast) actions.showToast('分析失败: ' + fmtErr(r ? r.message : '未知错误'));
         }
         if (actions.setLoading) actions.setLoading(false);
       }).catch(function(e) {
-        if (actions.showToast) actions.showToast('分析出错');
+        if (actions.showToast) actions.showToast('分析出错：' + fmtErr((e && e.message) || String(e)));
         if (actions.setLoading) actions.setLoading(false);
       });
     };
@@ -468,7 +468,7 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
                     }
                     if (actions.setLoading) actions.setLoading(false);
                   }).catch(function(e) {
-                    if (actions.showToast) actions.showToast('分析出错');
+                    if (actions.showToast) actions.showToast('分析出错：' + fmtErr((e && e.message) || String(e)));
                     if (actions.setLoading) actions.setLoading(false);
                   });
                 }}, [

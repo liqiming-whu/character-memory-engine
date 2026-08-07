@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 
 const shared = require("../shared");
-const { multiMatch, parseResult } = shared;
+const { multiMatch, parseResult, fmtErr } = shared;
 const theme = require("../theme");
 
 // ===== Tab 1: 待办 =====
@@ -44,7 +44,7 @@ function render(ctx, allData, states, actions) {
         actions.setResult('✅ 已删除');
       }
     } catch(e) {
-      actions.setResult('❌ ' + (e.message || String(e)));
+      actions.setResult('❌ ' + (fmtErr(e.message || String(e))));
     }
   }
 

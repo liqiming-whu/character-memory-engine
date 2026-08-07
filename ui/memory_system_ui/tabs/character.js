@@ -2,7 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 
 const shared = require("../shared");
-const { parseResult } = shared;
+const { parseResult, fmtErr } = shared;
 const theme = require("../theme");
 
 const CATEGORIES = [
@@ -483,7 +483,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
             setTimeout(function() {
               loadForPersona(pid, next, true).catch(function(err) {
                 loadingState[1](false);
-                resultState[1]('加载失败：' + (err && err.message ? err.message : String(err)));
+                resultState[1]('加载失败：' + fmtErr(err && err.message ? err.message : String(err)));
               });
             }, 0);
           }
