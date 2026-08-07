@@ -73,7 +73,7 @@ function render(ctx, allData, states, actions, memoryState) {
         items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.errorContainer, alpha: 0.5, padding: 10 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
             UI.Surface({ shape: { cornerRadius: 6 }, containerColor: colors.error, alpha: 0.15, padding: { left: 6, right: 6, top: 2, bottom: 2 } }, [
-              UI.Text({ text: inf.category || '其他', style: 'labelSmall', color: colors.error, fontSize: 10 }),
+              UI.Text({ text: (inf.category && inf.category !== 'info') ? inf.category : (inf.title || '其他'), style: 'labelSmall', color: colors.error, fontSize: 10 }),  // v1.8.5: CME 兼容——子标题在 title 字段
             ]),
             UI.Spacer({ width: 8 }),
             UI.Column({ weight: 1 }, [UI.Text({ text: inf.content || '', style: 'bodySmall', color: colors.onSurface, maxLines: 3 })]),
