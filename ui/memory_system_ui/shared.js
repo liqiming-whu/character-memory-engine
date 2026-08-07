@@ -70,7 +70,7 @@ function pad2(n) { return n < 10 ? '0' + n : '' + n; }
 // 工具未启用/未导入类错误（not found）追加引导文案，其余原样返回
 function fmtErr(msg) {
   var s = String(msg || '未知错误');
-  if (/not\s*found/i.test(s) || /No\s*tool/i.test(s)) {
+  if (/tools?\s+not\s*found/i.test(s) || /no\s+tool/i.test(s)) {
     return s + '，请在配置中启用';
   }
   return s;
