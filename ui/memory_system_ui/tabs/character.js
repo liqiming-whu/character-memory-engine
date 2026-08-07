@@ -85,6 +85,10 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   var localOpsTsState = ctx.useState('character_local_ops_ts_v1', 0);
   // v2.2.2：删除按钮两段式确认——第一次点击记录 pending（按钮变红显示确认态），第二次点击才执行删除
   var pendingDeleteState = ctx.useState('character_pending_delete_v1', '');
+  // v2.2.3：pending 权威判断用 useRef（不依赖渲染）——Operit 渲染器偶发不重绘时
+  // onClick 闭包可能读到旧 state 导致确认态丢失（点第二次又被当第一次，看起来像卡住）；
+  // ref.current 跨渲染即时更新，保证第二次点击一定执行删除
+  var pendingDeleteRef = ctx.useRef('character_pending_delete_ref_v1', '');
   // 渲染时强制墓碑过滤（在 screen 快照逻辑之前执行，保证任何来源的列表都被过滤）
   var opsTsNow = localOpsTsState[0];
   if (opsTsNow && (Date.now() - opsTsNow) < 60000) {
@@ -518,11 +522,21 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
             UI.Text({ text: memory.content || '', style: 'labelSmall', color: colors.onSurfaceVariant, maxLines: 3 }),
           ]),
           UI.Surface({ shape: { cornerRadius: 6 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: 5, onClick: function() {
-            if (isPending) {
+            // v2.2.3：用 ref 判断（不依赖渲染闭包旧值）；state 只负责视觉
+            if (pendingDeleteRef.current === delKey) {
+              pendingDeleteRef.current = '';
               pendingDeleteState[1]('');
               return deleteMemory(memory.id);
             } else {
+              pendingDeleteRef.current = delKey;
               pendingDeleteState[1](delKey);
+              // 5 秒未确认自动退出确认态（防残留误删）
+              setTimeout(function() {
+                if (pendingDeleteRef.current === delKey) {
+                  pendingDeleteRef.current = '';
+                  pendingDeleteState[1]('');
+                }
+              }, 5000);
               return null;
             }
           } }, [
