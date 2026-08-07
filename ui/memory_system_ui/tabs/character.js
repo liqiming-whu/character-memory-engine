@@ -12,10 +12,8 @@ const CATEGORIES = [
   { id: 'interaction_rule', label: '互动规则' },
 ];
 
-// v2.1.2：模块级删除防重入锁——本渲染器 onClick 存在"双触发"现象（同一点击事件
-// 会间隔数百毫秒~数秒再次调用），模块级变量跨闭包绝对共享，拦截第二次调用
-var __cmeDeleteLock = 0;
-var __cmeDeleteLockId = null;
+// v2.2.2：删除按钮改为"两段式确认"（第一次点击变确认态，第二次执行），
+// 天然防渲染器双触发与连点，不再需要防重入锁
 // v2.1.3：模块级"本地变更权威快照"——删除/创建成功后记录最新列表与时间戳；
 // 每次渲染强制应用（任何异步路径覆盖列表都会被拉回），30 秒后过期恢复正常加载。
 // 模块级变量跨渲染/跨闭包绝对共享，不依赖 useState/useRef 的可靠性。
@@ -85,6 +83,8 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   // 旧列表，渲染时也会被墓碑过滤掉，60 秒后过期恢复正常同步
   var localOpsState = ctx.useState('character_local_ops_v1', '[]');
   var localOpsTsState = ctx.useState('character_local_ops_ts_v1', 0);
+  // v2.2.2：删除按钮两段式确认——第一次点击记录 pending（按钮变红显示确认态），第二次点击才执行删除
+  var pendingDeleteState = ctx.useState('character_pending_delete_v1', '');
   // 渲染时强制墓碑过滤（在 screen 快照逻辑之前执行，保证任何来源的列表都被过滤）
   var opsTsNow = localOpsTsState[0];
   if (opsTsNow && (Date.now() - opsTsNow) < 60000) {
@@ -137,17 +137,20 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
     try {
       // v2.1.0：全不选 = 一次查全部（前端过滤四类）+ 更新缓存；单分类 = 查该分类
       var cat = catOverride || categoryState[0] || '';
-      var merged = [];
+      // v2.2.2：区分"查询成功但为空"与"查询失败"——空数据显示空态，不再误报读取失败
+      var ok = false;
       if (!cat) {
         var rr = parseResult(await callToolWithTimeout('memory_engine:list_memories', { character_id: targetPersonaId, limit: 200 }, 12000));
         var roleSet = ['character', 'relationship', 'preference', 'interaction_rule'];
-        merged = (rr && rr.success && rr.memories) ? rr.memories.filter(function(m) { return roleSet.indexOf(m.category) >= 0; }) : [];
+        ok = !!(rr && rr.success);
+        merged = ok && rr.memories ? rr.memories.filter(function(m) { return roleSet.indexOf(m.category) >= 0; }) : [];
         allMemoriesRef.current = merged;
       } else {
         var rr2 = parseResult(await callToolWithTimeout('memory_engine:list_memories', { category: cat, character_id: targetPersonaId, limit: 100 }, 12000));
-        if (rr2 && rr2.success && rr2.memories) merged = rr2.memories;
+        ok = !!(rr2 && rr2.success);
+        merged = ok && rr2.memories ? rr2.memories : [];
       }
-      if (merged.length > 0 || cat) {
+      if (ok) {
         // v2.1.0：相同内容不重复 setState（防并发重复渲染）
         var curM1 = memoriesState[0] || [];
         if (JSON.stringify(curM1) !== JSON.stringify(merged)) {
@@ -155,6 +158,9 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
         }
         loadedForRef.current = targetPersonaId + ':' + Date.now();
         retryAtRef.current = 0;
+        if (!cat && merged.length === 0 && !silent) {
+          resultState[1]('暂无角色记忆（0 条）');
+        }
       } else {
         // v2.1.0：查询失败/超时（Operit 工具调用层偶发波动）——不清空列表，5 秒后自动重试一次
         resultState[1]('读取失败：暂时无法读取，5 秒后自动重试…');
@@ -329,15 +335,6 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
 
   async function deleteMemory(mid) {
     var logLine = function(s) { try { ctx.callTool('memory_engine:log_ui', { line: s }); } catch (e) {} };
-    // v2.2.1：按 id 精确防重入——只拦同一 id 的渲染器双触发（毫秒级），
-    // 不再误拦用户间隔 <2 秒点击不同条目的真实操作（旧版全局锁导致"点两次才删"）
-    var nowLock = Date.now();
-    if (__cmeDeleteLockId === String(mid) && __cmeDeleteLock && (nowLock - __cmeDeleteLock) < 2000) {
-      logLine('[del] DUPLICATE IGNORED id=' + mid);
-      return;
-    }
-    __cmeDeleteLock = nowLock;
-    __cmeDeleteLockId = String(mid);
     logLine('[del] click id=' + mid + ' list=' + (memoriesState[0] || []).length);
     // v2.1.2：点击即进入本地变更保护（useState 跨渲染可靠）——异步等待/渲染风暴期间
     // 也不允许自动加载或快照覆盖干扰本地列表
@@ -510,13 +507,25 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       var rawTitle = String(memory.title || '').replace(/^\[persona:[^\]]+\]\s*/, '').trim();
       var fallbackText = String(memory.content || memory.description || '').trim();
       var displayTitle = rawTitle || (fallbackText.length > 20 ? fallbackText.substring(0, 20) + '…' : fallbackText) || '未命名记忆';
-      items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.surface, padding: 10 }, [
+      // v2.2.2：两段式确认（同待办页）——第一次点击进入确认态（变红），第二次点击执行删除；
+          // 渲染器双触发不会跳过确认态，天然防连点，无需防重入锁
+          var delKey = String(memory.id);
+          var isPending = pendingDeleteState[0] === delKey;
+          items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.surface, padding: 10 }, [
         UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
           UI.Column({ weight: 1 }, [
             UI.Text({ text: displayTitle, style: 'bodySmall', color: colors.onSurface, fontWeight: 'bold' }),
             UI.Text({ text: memory.content || '', style: 'labelSmall', color: colors.onSurfaceVariant, maxLines: 3 }),
           ]),
-          UI.Surface({ shape: { cornerRadius: 6 }, containerColor: colors.errorContainer, padding: 5, onClick: function() { return deleteMemory(memory.id); } }, [
+          UI.Surface({ shape: { cornerRadius: 6 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: 5, onClick: function() {
+            if (isPending) {
+              pendingDeleteState[1]('');
+              return deleteMemory(memory.id);
+            } else {
+              pendingDeleteState[1](delKey);
+              return null;
+            }
+          } }, [
             UI.Icon({ name: 'delete', tint: colors.error, size: 16 }),
           ]),
         ]),
