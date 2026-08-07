@@ -345,6 +345,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       resultState[1]('未找到该记忆');
       logLine('[del] NOT FOUND');
       return;
+    }
     logLine('[del] found id=' + m.id);
     var raw;
     try {
@@ -381,7 +382,6 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
     } else {
       resultState[1]((result && result.message) || '删除失败');
     }
-  }
   }
 
   async function loadOnEnter() {
