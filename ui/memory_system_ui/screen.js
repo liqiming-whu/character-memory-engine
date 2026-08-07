@@ -155,7 +155,8 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
      dbgUi('init', 'trigger_analysis 返回 started=' + (r && r.started) + ' skipped=' + (r && r.skipped) + ' success=' + (r && r.success));
      if (r && r.started) {
        // 异步分析已启动 → 显示"分析中"并轮询刷新数据
-       resultState[1]('🔄 检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析...');
+       var __estSec = Math.max(15, Math.min(120, Math.ceil((r.newMessageCount || 0) * 3)));
+       resultState[1]('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计约 ' + __estSec + ' 秒），你可以先做其他事，分析完成后将自动刷新');
        triggerPollRef.current += 1;
        var pollId = triggerPollRef.current;
        var startMs = Date.now();
@@ -164,7 +165,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
        (function pollOnce() {
          if (pollId !== triggerPollRef.current) return; // 已被新触发取代
          if (Date.now() - startMs > maxMs) {
-           resultState[1]('⏱️ 分析超时，请稍后手动刷新');
+           resultState[1]('分析超时，请稍后手动刷新');
            return;
          }
          setTimeout(async function() {
@@ -180,11 +181,11 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
                    // 分析已结束
                    if (parsed.success && parsed.hasData) {
                      await loadData();
-                     resultState[1]('✅ 后台分析完成：发现 ' + (parsed.newMessageCount || 0) + ' 条新内容');
+                     resultState[1]('后台分析完成：发现 ' + (parsed.newMessageCount || 0) + ' 条新内容');
                    } else if (parsed.success && !parsed.hasData) {
-                     resultState[1]('✅ 后台分析完成：未发现可提取内容');
+                     resultState[1]('后台分析完成：未发现可提取内容');
                    } else {
-                     resultState[1]('⚠️ 分析失败：' + (parsed.error || '未知错误'));
+                     resultState[1]('分析失败：' + (parsed.error || '未知错误'));
                    }
                    return;
                  }
@@ -198,9 +199,9 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
        })();
      } else if (r && r.skipped) {
        // 没有新内容：静默（也可选显示一句提示）
-       resultState[1]('✅ 无新对话内容 (' + (r.lastAnalyzedAt ? '上次分析：' + new Date(r.lastAnalyzedAt).toLocaleString() : '首次检测') + ')');
+       resultState[1]('无新对话内容 (' + (r.lastAnalyzedAt ? '上次分析：' + new Date(r.lastAnalyzedAt).toLocaleString() : '首次检测') + ')');
      } else if (r && !r.success) {
-       resultState[1]('⚠️ 检测失败：' + (fmtErr(r.message || r.error || '未知')));
+       resultState[1]('检测失败：' + (fmtErr(r.message || r.error || '未知')));
      }
    } catch(e) {}
  })();

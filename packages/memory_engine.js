@@ -106,7 +106,8 @@ METADATA
         { "name": "log_ui", "description": { "zh": "前端诊断日志写文件（不经 worker）", "en": "Frontend diag log to file" }, "parameters": [
             { "name": "line", "type": "string", "required": true, "description": "日志行内容" }
         ]},
-        { "name": "trigger_analysis", "description": { "zh": "触发 AI 分析对话并提取结构化记忆", "en": "Trigger AI analyze chat" }, "parameters": [
+        { "name": "trigger_analysis", "description": { "zh": "打开插件时自动检测新对话并后台分析", "en": "Auto detect new messages and analyze in background" }, "parameters": [
+            { "name": "chat_id", "type": "string", "required": false, "description": "对话ID；不传取 trigger.json 记录的当前对话" },
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
         { "name": "set_injection_settings", "description": { "zh": "设置记忆注入配置（启用/持久化/最大条数/是否按会话去重）", "en": "Set memory injection settings" }, "parameters": [
@@ -427,7 +428,7 @@ exports.deploy_status = deployStatus;
 exports.deploy_install = deployInstall;
 exports.deploy_restart = deployRestart;
 exports.save_ui_state = makeTool("save_ui_state");
-exports.trigger_analysis = makeTool("trigger_analysis");
+exports.trigger_analysis = triggerAnalysis;
 exports.set_injection_settings = makeTool("set_injection_settings");
 exports.backup_engine = makeTool("backup_engine");
 exports.inspect_engine = makeTool("inspect_engine");
@@ -515,12 +516,171 @@ async function analyzeChat(params) {
             character_id: (params && params.character_id) || undefined,
             persona_name: (params && params.persona_name) || ''
         });
+        // 手动分析成功同样推进水位线，避免下次打开插件重复全量分析
+        if (result && result.success) {
+            try {
+                var wmMax = 0;
+                for (var wmi = 0; wmi < messages.length; wmi++) {
+                    var wt = tsToMs(messages[wmi].timestamp);
+                    if (wt > wmMax) wmMax = wt;
+                }
+                var wtr = {};
+                try {
+                    var wtrRaw = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
+                    if (wtrRaw && wtrRaw.content) wtr = JSON.parse(wtrRaw.content) || {};
+                } catch (e) {}
+                if (!wtr.watermarks) wtr.watermarks = {};
+                if (wmMax > 0) wtr.watermarks[chatId] = wmMax;
+                wtr.lastAnalyzedAt = new Date().toISOString();
+                wtr.lastAnalyzedChatId = chatId;
+                try {
+                    await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(wtr, null, 2), false, 'android');
+                } catch (e) {}
+            } catch (e) {}
+        }
         return finish(result);
     } catch (e) {
         return finish({ success: false, message: '分析异常: ' + (e.message || String(e)) });
     }
 }
 exports.analyze_chat = analyzeChat;
+
+// ===== 时间戳健壮化：兼容 epoch 毫秒 / 秒 / ISO / 本地串 =====
+function tsToMs(v) {
+    if (v === undefined || v === null || v === '') return 0;
+    if (typeof v === 'number') return v > 1e12 ? v : v * 1000;
+    var s = String(v);
+    var n = Number(s);
+    if (!isNaN(n) && s.indexOf('-') < 0) return n > 1e12 ? n : n * 1000;
+    try {
+        var ds = s;
+        if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(ds)) {
+            ds = ds.replace(' ', 'T');
+            if (ds.indexOf('T') < 0) ds += 'T00:00:00';
+        }
+        var t = new Date(ds).getTime();
+        return isNaN(t) ? 0 : t;
+    } catch (e) { return 0; }
+}
+// ===== trigger_analysis：侧边栏打开时自动检测新对话 + 后台分析（与 CMS 行为一致）=====
+// 行为：
+//   1) 确定 chatId：params.chat_id → trigger.json.chatId → 最近对话
+//   2) getMessages desc+200（取最近窗口）→ 过滤空消息 → 按水位线过滤新消息
+//   3) 无新消息：返回 { skipped:true, reason:'no_new_content' }，不阻塞
+//   4) 有新消息：后台异步调 analyzeChat（fire-and-forget），立即返回 { started:true, newMessageCount:N }
+//   5) 分析完成后：推进水位线 + 写 MEMORY_SYSTEM_TRIGGER_RESULT env 通知前端轮询刷新
+async function triggerAnalysis(params) {
+    try {
+        var chatId = (params && params.chat_id) || '';
+        var tr = {};
+        try {
+            var trRaw = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
+            if (trRaw && trRaw.content) tr = JSON.parse(trRaw.content) || {};
+        } catch (e) {}
+        if (!chatId && tr.chatId) chatId = String(tr.chatId);
+        if (!chatId) {
+            try {
+                var chatList = await Tools.Chat.listChats({ limit: 20 });
+                var chats = (chatList && chatList.chats) || [];
+                if (chats.length > 0) {
+                    chats.sort(function (a, b) {
+                        return (b.updatedAt || b.updated_at || 0) - (a.updatedAt || a.updated_at || 0);
+                    });
+                    chatId = chats[0].id;
+                }
+            } catch (e) {}
+        }
+        if (!chatId) {
+            return finish({ success: false, skipped: true, reason: 'no_chat', message: '未找到最近对话' });
+        }
+        // 拉最近 200 条（order:'asc' 会取旧窗口漏掉新消息，必须 desc+reverse）
+        var allMessages = [];
+        try {
+            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'desc', limit: 200 });
+            if (msgResult && msgResult.messages) allMessages = msgResult.messages.reverse();
+        } catch (e) {}
+        // 过滤空消息和附件
+        allMessages = allMessages.filter(function (m) {
+            var c = (m.content || '').replace(/<attachment[^>]*>[\s\S]*?<\/attachment>/g, '').trim();
+            return c && c.length > 0;
+        });
+        // 水位线过滤
+        var watermarks = tr.watermarks || {};
+        var lastProcessedTs = watermarks[chatId] || 0;
+        var newMessages = lastProcessedTs
+            ? allMessages.filter(function (m) { return tsToMs(m.timestamp) > lastProcessedTs; })
+            : allMessages;
+        if (newMessages.length === 0) {
+            tr.lastCheckedAt = new Date().toISOString();
+            tr.lastCheckedChatId = chatId;
+            try {
+                await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(tr, null, 2), false, 'android');
+            } catch (e) {}
+            return finish({
+                success: true,
+                skipped: true,
+                reason: 'no_new_content',
+                lastProcessedTs: lastProcessedTs,
+                lastAnalyzedAt: tr.lastAnalyzedAt || null,
+                message: '没有新内容，跳过分析'
+            });
+        }
+        // 有新消息：后台异步分析，立即返回不阻塞 UI
+        var count = newMessages.length;
+        var callerCardId = (params && params.character_id) || tr.callerCardId || '';
+        var personaName = tr.personaName || '';
+        (async function () {
+            try {
+                var r = await analyzeChat({ chat_id: chatId, character_id: callerCardId, persona_name: personaName });
+                var rOk = !!(r && r.success && (!r.data || r.data.success !== false));
+                // 推进水位线
+                var maxTs = 0;
+                for (var mi = 0; mi < allMessages.length; mi++) {
+                    var t = tsToMs(allMessages[mi].timestamp);
+                    if (t > maxTs) maxTs = t;
+                }
+                var tr2 = {};
+                try {
+                    var trRaw2 = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
+                    if (trRaw2 && trRaw2.content) tr2 = JSON.parse(trRaw2.content) || {};
+                } catch (e) {}
+                if (!tr2.watermarks) tr2.watermarks = {};
+                if (maxTs > 0) tr2.watermarks[chatId] = maxTs;
+                tr2.lastAnalyzedAt = new Date().toISOString();
+                tr2.lastAnalyzedChatId = chatId;
+                tr2.lastAnalyzedNewCount = count;
+                tr2.lastResult = rOk ? 'has_data' : 'failed';
+                try {
+                    await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(tr2, null, 2), false, 'android');
+                } catch (e) {}
+                try {
+                    setEnv('MEMORY_SYSTEM_TRIGGER_RESULT', JSON.stringify({
+                        finishedAt: new Date().toISOString(),
+                        chatId: chatId,
+                        newMessageCount: count,
+                        success: rOk,
+                        hasData: rOk,
+                        error: rOk ? '' : ((r && (r.message || (r.data && r.data.message))) || '未知错误')
+                    }));
+                } catch (e) {}
+            } catch (e) {
+                try {
+                    setEnv('MEMORY_SYSTEM_TRIGGER_RESULT', JSON.stringify({
+                        finishedAt: new Date().toISOString(),
+                        chatId: chatId,
+                        newMessageCount: count,
+                        success: false,
+                        hasData: false,
+                        error: (e.message || String(e))
+                    }));
+                } catch (e2) {}
+            }
+        })();
+        return finish({ success: true, started: true, newMessageCount: count, message: '已启动后台分析' });
+    } catch (e) {
+        return finish({ success: false, message: '检测异常: ' + (e.message || String(e)) });
+    }
+}
 
 // ===== diag_engine：插件侧诊断（不经 worker，worker 未运行时也能用）=====
 // 解决死锁：worker 起不来时部署页无法通过 worker 查状态/看日志。
