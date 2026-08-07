@@ -137,6 +137,9 @@ docs/
 - [x] P8 注入优化（v2.2.0 已完成并真机端到端验证，方案参考 https://github.com/liqiming-whu/character-memory-system）：
   - ① 技术降权排序：注入拼装处按 importance 加权（high=1000/medium=500/low=100），标题或正文命中 `TECH_RE = /技术|调试|bug|报错|error|修复|配置|接口|API/` 再降 -60，开发记录类记忆沉底，人物/生活记忆优先浮出（实测：问"我的习惯"时"熟悉Python"沉底、生活习惯类浮出）；
   - ② snapshot 跨轮去重：worker `search_memories` 增加可选参数 `exclude_ids`；main.js 注入成功后按 chatId 记录本次注入的记忆 id 到 `memory_injection_history.json`（超 50 条截断保留最近），下次注入读取并传入 `exclude_ids`，同一会话已注入过的记忆不再重复注入（等价宿主 query_memory 的 snapshot_id 机制；实测三轮消息注入 9 条零重复）；
+    - **开关（v2.2.1）**：配置项 `allowRepeatedMemorySearch`（对齐官方 message_insert，默认 false=去重）：false 时按会话 id 排除已注入记忆；true 时每次全量重新检索（允许重复）。UI 设置面板「允许重复检索」开关（正语义直接绑定，无取反）。⚠️ UI 传参必须用与工具声明一致的下划线键 `allow_repeated_memory_search`（驼峰键会被 callTool 参数处理弄丢，曾导致开关保存失效）。
+-    - **兜底（v2.2.1）**：worker 排除后候选不足 limit 时从最早注入的记忆开始释放（按相似度补回），保证注入永不返回空（角色库 22 条 < 历史累积量时不再 0 条）；新记忆优先、旧记忆轮换复用。
+-    - **随消息保存（v2.2.1）**：persist=true 时新增 `onPromptInput`（before_process）把注入内容直接拼进消息文本（随消息落库、不走附件）；persist=false 时保持 finalize 附件注入（只给模型看不落库）；两阶段互斥防双份。
   - ③ 语义检索候选池修复（v2.2.0 附带）：向量召回 `k=limit*3` 太小导致全局技术噪音霸占近邻名额、角色库记忆被挤出（排除已注入后候选为空 → 注入 0 条），改为全量取回 `k=max(limit*50, 200)` 再做角色过滤。
   - 设计边界（已确认，勿改）：**注入源保持 CME 自己 SQLite 为特性**，不做宿主记忆库注入；注入前去重维持字符串级（seenKeys），入库侧三级语义去重（精确 hash → 文本相似度 → 向量去重）已承担主责。
 

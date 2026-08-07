@@ -109,10 +109,11 @@ METADATA
         { "name": "trigger_analysis", "description": { "zh": "触发 AI 分析对话并提取结构化记忆", "en": "Trigger AI analyze chat" }, "parameters": [
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
-        { "name": "set_injection_settings", "description": { "zh": "设置记忆注入配置（启用/持久化/最大条数）", "en": "Set memory injection settings" }, "parameters": [
+        { "name": "set_injection_settings", "description": { "zh": "设置记忆注入配置（启用/持久化/最大条数/是否按会话去重）", "en": "Set memory injection settings" }, "parameters": [
             { "name": "enabled", "type": "boolean", "required": false, "description": "是否启用注入" },
             { "name": "persist", "type": "boolean", "required": false, "description": "是否跨对话持久化" },
-            { "name": "max_memories", "type": "integer", "required": false, "description": "每次注入最大条数，默认5" }
+            { "name": "max_memories", "type": "integer", "required": false, "description": "每次注入最大条数，默认5" },
+            { "name": "allow_repeated_memory_search", "type": "boolean", "required": false, "description": "是否允许重复记忆检索（true=不去重，false=按会话id去重，默认false）" }
         ]}
     ]
 }

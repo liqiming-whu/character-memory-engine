@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.2.1（2026-08-07，会话去重开关 + 注入兜底修复版）
+
+### 新增：allowRepeatedMemorySearch 开关（对齐官方 message_insert）
+- 配置项 `allowRepeatedMemorySearch`（默认 false）：false=按会话 id 去重（同一会话已注入过的记忆优先不重复）；true=允许重复检索（每次注入重新召回，可能重复）
+- UI 设置面板新增「允许重复检索」开关（正语义，直接绑定字段，无取反）
+- worker `set_injection_settings` 支持 `allow_repeated_memory_search` 参数；main.js 注入时按开关决定是否传 `exclude_ids`
+
+### 新增：注入内容随消息保存（对齐官方 persistInjectedContent）
+- persist=true：新增 `onPromptInput` hook（before_process 阶段）把注入内容**直接拼进消息文本**，随消息一起保存到聊天记录（不走附件）
+- persist=false：保持 `onPromptFinalize`（before_send_to_model）附件注入——只发给模型，不写入聊天记录
+- 两阶段互斥：persist=true 时 finalize 跳过附件注入，避免内容双份
+- 实测：persist=true → 文本拼接注入 370 chars、消息无 Memory 附件；enabled=false → 完全不注入（消息无文本无附件）
+
+### 修复：UI 保存失效（开关重进状态丢失）
+- **根因**：screen.js 传驼峰键 `allowRepeatedMemorySearch` 给 `ctx.callTool`，工具声明参数为下划线 `allow_repeated_memory_search`，callTool 参数处理导致值丢失/错乱 → 保存后配置未变（重进显示旧状态）
+- **修复**：saveInjectionSettings 构造与工具声明完全一致的下划线 payload（`max_memories` / `allow_repeated_memory_search`）
+- 验证：dbg_ui.log 确认 patch/payload 与实际保存一致；关→重进保持关、开→重进保持开
+
+### 修复：注入结果 0（历史排空）
+- **根因**：`memory_injection_history.json` 按会话累积已注入 id，角色库仅 22 条时历史可覆盖全部 → `exclude_ids` 排除所有候选 → 注入 0 条
+- **修复**：worker `search_memories` 增加兜底——排除后候选不足 limit 时，从最早注入的记忆开始释放（按相似度补回），保证注入永不返回空；新记忆优先、旧记忆轮换复用
+- 实测：历史 22 条全排后仍返回 15 条候选、注入 5 条
+
+### 排查发现（记录备查）
+- 向量检索候选池 k 全量取回（v2.2.0 ③）后角色过滤正常；本轮进一步确认 worker 部署链路：app 重启时 `deployWorkerToData` 若静默失败，`ensureWorkerUp` 会用旧 DATA_DIR 副本覆盖 /root 新代码——热更新后务必确认三处（dev / DATA_DIR / /root）worker.py 一致
+
 ## v2.2.0（2026-08-07，记忆注入 + P7/P8 完成版）
 
 ### 核心功能：记忆自动注入（对齐官方 message_insert 模式）

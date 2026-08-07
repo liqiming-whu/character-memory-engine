@@ -6,6 +6,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.registerToolPkg = registerToolPkg;
 exports.onAppCreate = onAppCreate;
 exports.onPromptFinalize = onPromptFinalize;
+exports.onPromptInput = onPromptInput;
 
 var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 
@@ -343,13 +344,19 @@ async function buildMemoryInjectionText(messageText, callerCardId, chatIdParam) 
   var chatId = String(chatIdParam || '').trim();
   var history = await readInjectionHistory();
   var prevIds = (chatId && history[chatId]) ? history[chatId] : [];
+  // 对齐官方 message_insert：allowRepeatedMemorySearch=true 时允许重复检索（不去重），
+  // false（默认）时按会话 id 去重——同一会话已注入过的记忆不再重复注入
+  var allowRepeat = settings.allowRepeatedMemorySearch === true;
+  var usePrevIds = (!allowRepeat && prevIds.length > 0) ? prevIds : [];
+  jsLog('DEBUG', 'inject: q=' + searchText.substring(0, 40) + ' | card=' + (callerCardId || '(空)') + ' | chat=' + chatId + ' | prev=' + usePrevIds.length + ' | allowRepeat=' + allowRepeat);
   var res = await httpCall('search_memories', {
     query: searchText.length > 200 ? searchText.substring(0, 200) : searchText,
     limit: limit * 3,
     character_id: callerCardId || undefined,
-    exclude_ids: prevIds.length > 0 ? prevIds : undefined
+    exclude_ids: usePrevIds.length > 0 ? usePrevIds : undefined
   });
   var memories = (res && res.memories) || [];
+  jsLog('DEBUG', 'inject: res.success=' + (res && res.success) + ' mems=' + memories.length + (res && res.message ? ' | msg=' + res.message : ''));
   // P8①：importance 加权 + 技术类降权，重排后取前 limit 条（人物/生活记忆优先浮出）
   memories.sort(function(a, b) { return memoryInjectScore(b) - memoryInjectScore(a); });
   memories = memories.slice(0, limit);
@@ -387,6 +394,31 @@ async function injectMemoryAttachment(processedInput, callerCardId, chatId) {
     return String(processedInput || '').replace(/\s+$/, '') + ' ' + tag;
   } catch (e) {
     jsLog('WARN', 'memory injection 失败: ' + (e.message || String(e)));
+    return null;
+  }
+}
+// v2.2.1：注入内容随消息保存（对齐官方 persistInjectedContent）：
+// persist=true → before_process 阶段把注入内容直接拼进消息文本（随消息落库，不走附件）；
+// persist=false → 不在此处处理，由 onPromptFinalize 以附件形式临时注入（只给模型看不落库）。
+async function onPromptInput(input) {
+  var evt = (input && input.eventPayload) || {};
+  var stage = String(evt.stage ?? input.eventName ?? "");
+  if (stage !== "before_process") return null;
+  try {
+    var settings = await readInjectionSettings();
+    if (!settings || settings.persist !== true) return null;
+    var processedInput = String(evt.processedInput ?? evt.rawInput ?? "").trim();
+    if (!processedInput) return null;
+    var activePrompt = evt.metadata && evt.metadata.activePrompt;
+    var callerCardId = (activePrompt && activePrompt.type === 'character_card') ? String(activePrompt.id || '') : '';
+    if (!callerCardId) return null;
+    var chatId = String(evt.chatId || "").trim();
+    var content = await buildMemoryInjectionText(processedInput, callerCardId, chatId);
+    if (!content) return null;
+    jsLog('DEBUG', 'onPromptInput: persist=true 文本拼接注入 ' + content.length + ' chars');
+    return String(processedInput).replace(/\s+$/, '') + '\n\n' + content;
+  } catch (e) {
+    jsLog('WARN', 'onPromptInput异常: ' + (e.message || String(e)));
     return null;
   }
 }
@@ -454,11 +486,18 @@ async function onPromptFinalize(input) {
       }
     }
     // v2.2.0：记忆注入（官方额外信息注入插件模式）——召回当前角色记忆附加到消息
+    // v2.2.1：persist=true 时注入内容已在 onPromptInput（before_process）阶段拼进消息文本，
+    // 此处跳过附件注入避免双份；persist=false 时保持附件注入（只给模型看不落库）
     try {
       var processedInput = String(evt.processedInput ?? evt.rawInput ?? "").trim();
       if (processedInput && callerCardId) {
-        var injected = await injectMemoryAttachment(processedInput, callerCardId, currentChatId);
-        if (injected) return injected;
+        var injSettings = await readInjectionSettings();
+        if (!(injSettings && injSettings.persist === true)) {
+          var injected = await injectMemoryAttachment(processedInput, callerCardId, currentChatId);
+          if (injected) return injected;
+        } else {
+          jsLog('DEBUG', 'onPromptFinalize: persist=true 跳过附件注入（已在 onPromptInput 拼接）');
+        }
       }
     } catch (e2) {
       jsLog('WARN', 'onPromptFinalize 注入异常: ' + (e2.message || String(e2)));
@@ -536,6 +575,10 @@ function registerToolPkg() {
         id: "memory_engine_prompt_finalize",
         function: onPromptFinalize
     });
-
+    // v2.2.1：注入内容随消息保存（persist=true 时 before_process 文本拼接注入）
+    ToolPkg.registerPromptInputHook({
+        id: "memory_engine_prompt_input",
+        function: onPromptInput
+    });
     return true;
 }

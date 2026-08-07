@@ -418,9 +418,29 @@ def search_memories(conn, params):
         results = [(1.0, r) for r in rows]
     # P8② snapshot 跨轮去重：排除指定记忆 id（同一会话已注入过的不再重复注入）
     if exclude_ids:
-        ex = set(str(x) for x in exclude_ids)
-        results = [(s, r) for s, r in results if str(r["id"]) not in ex]
+        ex = [str(x) for x in exclude_ids]  # 保持注入顺序：早 -> 晚
+        all_candidates = results  # 排除前的完整候选（已按相似度排序）
+        ex_set = set(ex)
+        results = [(s, r) for s, r in results if str(r["id"]) not in ex_set]
+        # 兜底：排除后候选不足 limit 时，从最早注入的记忆开始释放（按相似度补回），
+        # 保证注入永不因"角色库记忆全部被排除"而返回空；新记忆优先，旧记忆轮换复用
+        if len(results) < limit and len(ex) > 0:
+            remaining = {str(r["id"]) for _s, r in results}
+            for eid in ex:
+                if len(results) >= limit:
+                    break
+                if eid in remaining:
+                    continue
+                for s, r in all_candidates:
+                    if str(r["id"]) == eid:
+                        results.append((s, r))
+                        remaining.add(eid)
+                        break
+            results.sort(key=lambda x: -x[0])  # 补回后按相似度重新排序
     results = results[:limit]
+    log("INFO", "search_memories q=%s card=%s ex=%d -> %d/%d" % (
+        (query or "")[:30], str(params.get("character_id") or "(空)")[:36],
+        len(exclude_ids) if exclude_ids else 0, len(results), params.get("limit") or 0))
     return {"success": True, "memories": [row_to_obj(r) for _s, r in results], "total": len(results)}
 
 
@@ -1167,6 +1187,7 @@ def set_injection_settings(conn, params):
         "enabled": bool(params.get("enabled", False)),
         "persist": bool(params.get("persist", True)),
         "maxMemories": int(params.get("max_memories") or params.get("maxMemories") or 5),
+        "allowRepeatedMemorySearch": bool(params.get("allow_repeated_memory_search", params.get("allowRepeatedMemorySearch", False))),
     }
     if injection["maxMemories"] < 1 or injection["maxMemories"] > 20:
         injection["maxMemories"] = 5

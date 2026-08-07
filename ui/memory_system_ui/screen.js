@@ -580,15 +580,25 @@ loadingChatsState[1](false);
 
   async function saveInjectionSettings(patch) {
     var seq = (injectionSaveSeqRef.current = (injectionSaveSeqRef.current || 0) + 1);
-    var current = injectionState[0] || { enabled: false, persist: true, maxMemories: 5 };
+    var current = injectionState[0] || { enabled: false, persist: true, maxMemories: 5, allowRepeatedMemorySearch: false };
     var next = {
       enabled: patch.enabled !== undefined ? patch.enabled : current.enabled,
       persist: patch.persist !== undefined ? patch.persist : current.persist,
-      maxMemories: current.maxMemories
+      maxMemories: current.maxMemories,
+      allowRepeatedMemorySearch: patch.allowRepeatedMemorySearch !== undefined ? patch.allowRepeatedMemorySearch : current.allowRepeatedMemorySearch
     };
+    dbgUi('saveInjection', 'patch=' + JSON.stringify(patch) + ' next=' + JSON.stringify(next));
     injectionState[1](next);
     try {
-      var raw = await ctx.callTool('memory_engine:set_injection_settings', next);
+      // 参数名与工具声明完全一致（下划线），避免 callTool 对驼峰键的过滤/重命名干扰
+      var toolPayload = {
+        enabled: next.enabled,
+        persist: next.persist,
+        max_memories: next.maxMemories,
+        allow_repeated_memory_search: next.allowRepeatedMemorySearch
+      };
+      dbgUi('saveInjection', 'callTool payload=' + JSON.stringify(toolPayload));
+      var raw = await ctx.callTool('memory_engine:set_injection_settings', toolPayload);
       var r = parseResult(raw);
       if (seq !== injectionSaveSeqRef.current) return; // 已有更新的保存请求，旧响应不覆盖
       if (r && r.success && r.injection) {
@@ -1112,6 +1122,13 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
               UI.Text({ text: '开启：附件随用户消息一起落盘；关闭：仅发送给模型，不写入聊天记录。', style: 'labelSmall', color: colors.onSurfaceVariant }),
             ]),
             UI.Switch({ checked: !!(injectionState[0] && injectionState[0].persist), onCheckedChange: function(v) { saveInjectionSettings({ persist: v }); } }),
+          ]),
+          UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
+            UI.Column({ weight: 1, spacing: 2 }, [
+              UI.Text({ text: '允许重复检索', style: 'bodySmall', color: colors.onSurface, fontWeight: 'bold' }),
+              UI.Text({ text: '开启：每次注入重新检索，已注入过的记忆可能再次出现；关闭：同一会话已注入过的记忆优先不重复（历史排空时自动复用最早的）。对齐官方 allowRepeatedMemorySearch。', style: 'labelSmall', color: colors.onSurfaceVariant }),
+            ]),
+            UI.Switch({ checked: !!(injectionState[0] && injectionState[0].allowRepeatedMemorySearch), onCheckedChange: function(v) { saveInjectionSettings({ allowRepeatedMemorySearch: v }); } }),
           ]),
           UI.Column({ fillMaxWidth: true, spacing: 4 }, [
             UI.Column({ spacing: 2 }, [
