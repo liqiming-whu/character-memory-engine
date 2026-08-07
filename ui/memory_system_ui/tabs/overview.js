@@ -6,7 +6,7 @@ const { getTypeColor, getTypeIcon, pad2 } = shared;
 const theme = require("../theme");
 
 // ===== Tab 0: 概览 =====
-function render(ctx, allData) {
+function render(ctx, allData, actions) {
   var UI = ctx.UI;
   var colors = theme.c(ctx.MaterialTheme && ctx.MaterialTheme.colorScheme);
   var items = [];
@@ -48,7 +48,7 @@ function render(ctx, allData) {
     ovTodoItems.push(UI.Text({ text: '... 还有 ' + (todayPending.length - 3) + ' 项', style: 'labelSmall', color: colors.outline, fontSize: 10 }));
   }
   if (todayPending.length > 0) {
-    ovTodoItems.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.error, alpha: 0.1, padding: { left: 10, right: 10, top: 4, bottom: 4 }, fillMaxWidth: true }, [
+    ovTodoItems.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: colors.error, alpha: 0.1, padding: { left: 10, right: 10, top: 4, bottom: 4 }, fillMaxWidth: true, onClick: function() { if (actions && actions.onOpenTodos) actions.onOpenTodos(); } }, [
       UI.Row({ fillMaxWidth: true, horizontalArrangement: 'center' }, [
         UI.Text({ text: '查看全部待办', style: 'labelSmall', color: colors.error, fontWeight: 'bold' }),
       ]),

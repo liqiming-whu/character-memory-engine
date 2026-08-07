@@ -1097,7 +1097,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
 
   var tabContent;
   switch (currentTab) {
-    case 0: tabContent = overviewTab.render(ctx, allData); break;
+    case 0: tabContent = overviewTab.render(ctx, allData, { onOpenTodos: function() { tabState[1](1); } }); break;
     case 1: tabContent = todosTab.render(ctx, allData, states, actions); break;
     case 2: tabContent = timelineTab.render(ctx, allData, states, actions); break;
     case 3: tabContent = knowledgeTab.render(ctx, allData, states, actions, memoryState[0]); break;
@@ -1178,7 +1178,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
     ].concat(cfgSection);
       break;
     case 6: tabContent = deployTab.render(ctx); break;
-    default: tabContent = overviewTab.render(ctx, allData);
+    default: tabContent = overviewTab.render(ctx, allData, { onOpenTodos: function() { tabState[1](1); } });
   }
   // v2.1.0：数据型 tab 未就绪时显示加载占位，避免快速切换出现空白
   var dts0 = Number(dataLoadedState[0] || 0);
