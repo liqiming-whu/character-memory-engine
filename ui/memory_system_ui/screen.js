@@ -548,7 +548,21 @@ loadingChatsState[1](false);
     } catch (e) {}
   }
 
+  var _loadMemTimer = null;
+  var _loadMemPending = null;
+  // v2.3.1：loadMem 300ms 防抖——连续删除记忆时合并为一次全量刷新（同 loadData 模式）
   async function loadKnowledgeMemories() {
+    if (_loadMemTimer) return _loadMemPending;
+    _loadMemPending = new Promise(function(__resolve) {
+      _loadMemTimer = setTimeout(function() {
+        _loadMemTimer = null;
+        _loadMemPending = null;
+        _loadKnowledgeMemoriesImpl().then(__resolve);
+      }, 300);
+    });
+    return _loadMemPending;
+  }
+  async function _loadKnowledgeMemoriesImpl() {
     var rid = nextReqId('mem');
     dbgUi('loadMem', 'req#' + rid + ' 触发');
     memoryLoadingState[1](true);
@@ -828,6 +842,8 @@ loadingChatsState[1](false);
       // v2.3.0：前端统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
       var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
       var r = parseResult(raw);
+      // v2.3.1：成功或失败都先本地移除该行——连点不再命中过期行；loadData 后台刷新兜底（300ms 防抖已覆盖）
+      dropLifeItemFromData(category, idOrIndex);
       if (r && r.success) {
         await loadData();
         resultState[1]('✅ 已删除');
@@ -841,15 +857,32 @@ loadingChatsState[1](false);
     }
   }
 
+  // v2.3.1：本地移除六类数据中的指定 id（成功/失败通用——失败说明行已过期，移除避免重复点击）
+  function dropLifeItemFromData(category, idOrIndex) {
+    var cur = dataState[0];
+    if (!cur) return;
+    var key = String(category || '');
+    var list = cur[key];
+    if (!Array.isArray(list)) return;
+    var sid = String(idOrIndex);
+    var next = list.filter(function(it) { return String(it && it.id) !== sid; });
+    if (next.length !== list.length) {
+      var nxt = {};
+      for (var k in cur) { nxt[k] = cur[k]; }
+      nxt[key] = next;
+      dataState[1](nxt);
+    }
+  }
   async function deleteMemory(memoryId) {
     try {
       var raw = await ctx.callTool('memory_engine:delete_memory', { id: memoryId });
       var r = parseResult(raw);
+      // v2.3.1：成功或失败都先本地移除该条（按 id）——连点不再命中过期行；loadMem 防抖刷新兜底
+      dropMemoryFromCache(memoryId);
       if (r && r.success) {
         await loadKnowledgeMemories();
         resultState[1]('✅ 已删除');
       } else if (r && r.message && /memory not found/i.test(r.message)) {
-        dropMemoryFromCache(memoryId);
         resultState[1]('✅ 已删除');
       } else {
         resultState[1]('❌ ' + (fmtErr(r ? r.message : '未知错误')));
@@ -864,9 +897,15 @@ loadingChatsState[1](false);
       }
     }
   }
-  function dropMemoryFromCache(memoryTitle) {
+  // v2.3.1：按 id 优先移除（title 兜底）——调用方传 id，原实现按 title 比较删不掉
+  function dropMemoryFromCache(memoryId) {
     var cur = memoryState[0] || [];
-    var next = cur.filter(function(m) { return String(m.title || '') !== String(memoryTitle); });
+    var sid = String(memoryId);
+    var next = cur.filter(function(m) {
+      if (m && m.id !== undefined && String(m.id) === sid) return false;
+      if (m && m.title !== undefined && String(m.title) === sid) return false;
+      return true;
+    });
     if (next.length !== cur.length) {
       memoryState[1](next);
       try { ctx.setEnv('CACHED_MEMORIES', JSON.stringify(next)); } catch (e) {}
