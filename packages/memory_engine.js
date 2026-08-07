@@ -44,13 +44,15 @@ METADATA
             { "name": "index", "type": "integer", "required": false, "description": "更新索引" },
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
-        { "name": "delete_life_item", "description": { "zh": "删除六类条目", "en": "Delete life data item" }, "parameters": [
+        { "name": "delete_life_item", "description": { "zh": "删除六类条目（id 优先；无 id 时按 index）", "en": "Delete life data item (id first, fallback index)" }, "parameters": [
             { "name": "category", "type": "string", "required": true, "description": "分类" },
-            { "name": "index", "type": "integer", "required": true, "description": "索引" },
+            { "name": "id", "type": "integer", "required": false, "description": "条目ID（推荐，精确删除）" },
+            { "name": "index", "type": "integer", "required": false, "description": "索引（无 id 时使用）" },
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
-        { "name": "toggle_todo", "description": { "zh": "切换待办状态", "en": "Toggle todo status" }, "parameters": [
-            { "name": "index", "type": "integer", "required": true, "description": "索引" },
+        { "name": "toggle_todo", "description": { "zh": "切换待办状态（id 优先；无 id 时按 index）", "en": "Toggle todo status (id first, fallback index)" }, "parameters": [
+            { "name": "id", "type": "integer", "required": false, "description": "待办ID（推荐）" },
+            { "name": "index", "type": "integer", "required": false, "description": "索引（无 id 时使用）" },
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
         { "name": "list_characters", "description": { "zh": "列出角色", "en": "List characters" }, "parameters": []},
