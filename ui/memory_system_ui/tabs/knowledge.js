@@ -31,16 +31,10 @@ function render(ctx, allData, states, actions, memoryState) {
 
   // 生成删除按钮
   function makeDeleteBtn(category, index, key) {
-    var isPending = states.pendingDelete === key;
-    return UI.Surface({ shape: { cornerRadius: 4 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: { left: 6, right: 6, top: 2, bottom: 2 }, onClick: function() {
-      if (isPending) {
-        actions.setPendingDelete('');
-        return actions.deleteItem(category, index);
-      } else {
-        actions.setPendingDelete(key);
-      }
+    return UI.Surface({ shape: { cornerRadius: 4 }, containerColor: colors.errorContainer, padding: { left: 6, right: 6, top: 2, bottom: 2 }, onClick: function() {
+      return actions.deleteItem(category, index);
     } }, [
-      UI.Text({ text: isPending ? '确认' : '删除', style: 'labelSmall', color: isPending ? colors.onErrorContainer : colors.error, fontSize: 9, fontWeight: 'bold' }),
+      UI.Text({ text: '删除', style: 'labelSmall', color: colors.error, fontSize: 9, fontWeight: 'bold' }),
     ]);
   }
 
