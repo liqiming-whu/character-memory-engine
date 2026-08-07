@@ -468,7 +468,9 @@ async function analyzeChat(params) {
         // 取对话消息（限 200 条防超长）
         var messages = [];
         try {
-            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc', limit: 200 });
+            // 取最近 200 条（order:'asc' 会取旧窗口漏掉新消息，必须 desc+reverse）
+            var msgResult = await Tools.Chat.getMessages(chatId, { order: 'desc', limit: 200 });
+            if (msgResult && msgResult.messages) msgResult.messages.reverse();
             if (msgResult && msgResult.messages) messages = msgResult.messages;
         } catch (e) {}
         if (messages.length === 0) {

@@ -102,7 +102,9 @@ async function autoAnalyzeChat(chatId, callerCardId, personaName) {
   jsLog('INFO', 'autoAnalyze 开始 chatId=' + chatId);
   try {
     // 取对话
-    var msgResult = await Tools.Chat.getMessages(chatId, { order: 'asc', limit: 200 });
+    // 取最近 200 条（order:'asc' 会取旧窗口漏掉新消息，必须 desc+reverse）
+    var msgResult = await Tools.Chat.getMessages(chatId, { order: 'desc', limit: 200 });
+    if (msgResult && msgResult.messages) msgResult.messages.reverse();
     if (!msgResult || !msgResult.messages || msgResult.messages.length === 0) {
       jsLog('DEBUG', 'autoAnalyze: 取对话为空 chatId=' + chatId);
       return;
