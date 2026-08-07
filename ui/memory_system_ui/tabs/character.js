@@ -328,13 +328,15 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
 
   async function deleteMemory(mid) {
     var logLine = function(s) { try { ctx.callTool('memory_engine:log_ui', { line: s }); } catch (e) {} };
-    // v2.1.2：模块级防重入——拦截渲染器 onClick 双触发（间隔 <2 秒的重复调用直接忽略）
+    // v2.2.1：按 id 精确防重入——只拦同一 id 的渲染器双触发（毫秒级），
+    // 不再误拦用户间隔 <2 秒点击不同条目的真实操作（旧版全局锁导致"点两次才删"）
     var nowLock = Date.now();
-    if (__cmeDeleteLock && (nowLock - __cmeDeleteLock) < 2000) {
+    if (__cmeDeleteLockId === String(mid) && __cmeDeleteLock && (nowLock - __cmeDeleteLock) < 2000) {
       logLine('[del] DUPLICATE IGNORED id=' + mid);
       return;
     }
     __cmeDeleteLock = nowLock;
+    __cmeDeleteLockId = String(mid);
     logLine('[del] click id=' + mid + ' list=' + (memoriesState[0] || []).length);
     // v2.1.2：点击即进入本地变更保护（useState 跨渲染可靠）——异步等待/渲染风暴期间
     // 也不允许自动加载或快照覆盖干扰本地列表
