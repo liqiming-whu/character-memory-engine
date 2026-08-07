@@ -1014,11 +1014,10 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
   var typeFilters = [];
   function makeFilterChip(label, value) {
     var isActive = filterType === value;
-    typeFilters.push(UI.FilterChip({
-      label: UI.Text({ text: label, style: 'labelSmall' }),
-      selected: isActive,
-      onClick: function() { filterTypeState[1](isActive ? '' : value); }
-    }));
+    // v1.8.5：FilterChip 白框改实色按钮（选中 primary 实底白字粗体，未选中 surfaceContainerHigh 浅底）
+    typeFilters.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: isActive ? colors.primary : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() { filterTypeState[1](isActive ? '' : value); } }, [
+      UI.Text({ text: label, style: 'labelSmall', color: isActive ? colors.onPrimary : colors.onSurfaceVariant, fontWeight: 'bold' }),
+    ]));
   }
 
   if (currentTab === 2) {
