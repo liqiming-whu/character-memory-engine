@@ -356,7 +356,9 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
 
   for (var mi = 0; mi < memoriesState[0].length; mi++) {
     (function(memory) {
-      var displayTitle = String(memory.title || '未命名记忆').replace(/^\[persona:[^\]]+\]\s*/, '');
+      var rawTitle = String(memory.title || '').replace(/^\[persona:[^\]]+\]\s*/, '').trim();
+      var fallbackText = String(memory.content || memory.description || '').trim();
+      var displayTitle = rawTitle || (fallbackText.length > 20 ? fallbackText.substring(0, 20) + '…' : fallbackText) || '未命名记忆';
       items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.surface, padding: 10 }, [
         UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
           UI.Column({ weight: 1 }, [

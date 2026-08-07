@@ -359,13 +359,13 @@ def vec_dedup(conn, category, title, content, character_id):
 
 def search_memories(conn, params):
     """语义检索：query 向量 + 关键词 + 角色过滤，返回排序结果。
-
     方案 A：向量近邻为主；方案 B（无向量）：仅关键词。
     """
     character_id = params.get("character_id")
     category = params.get("category")
     query = params.get("query") or ""
     limit = int(params.get("limit") or 20)
+    exclude_ids = params.get("exclude_ids")
     if not query:
         return {"success": True, "memories": [], "total": 0}
 
@@ -375,8 +375,11 @@ def search_memories(conn, params):
         try:
             vec = embedder.embed(query, is_query=True)
             vec_str = "[" + ",".join(f"{v:.6f}" for v in vec) + "]"
+            # 候选池全量取回（当前库规模 <200 条）：先取回全部近邻再做角色/分类过滤，
+            # 避免全局技术噪音霸占近邻名额、角色库记忆被挤出
+            k = max(limit * 50, 200)
             rows = conn.execute(
-                "SELECT rowid, distance FROM vec_items WHERE embedding MATCH ? AND k=?", (vec_str, limit * 3),
+                "SELECT rowid, distance FROM vec_items WHERE embedding MATCH ? AND k=?", (vec_str, k),
             ).fetchall()
             for r in rows:
                 mem = conn.execute(
@@ -413,7 +416,10 @@ def search_memories(conn, params):
             args.append(str(category))
         rows = conn.execute(sql + " ORDER BY updated_at DESC LIMIT ?", args + [limit]).fetchall()
         results = [(1.0, r) for r in rows]
-
+    # P8② snapshot 跨轮去重：排除指定记忆 id（同一会话已注入过的不再重复注入）
+    if exclude_ids:
+        ex = set(str(x) for x in exclude_ids)
+        results = [(s, r) for s, r in results if str(r["id"]) not in ex]
     results = results[:limit]
     return {"success": True, "memories": [row_to_obj(r) for _s, r in results], "total": len(results)}
 

@@ -58,6 +58,10 @@ function Screen(ctx) {
   var showSearchState = ctx.useState('showSearch', false);
   var dataState = ctx.useState('allData', cachedData);
   var dataLoadedState = ctx.useState('allDataLoaded', false);
+  // P1-3：dataLoadedTs 用 setEnv 兜底持久化——跨模块实例恢复"已加载"状态（仅空时恢复一次，防渲染循环）
+  if (!dataLoadedState[0]) {
+    try { if (ctx.getEnv('MEMORY_ENGINE_DATA_LOADED')) dataLoadedState[1](true); } catch(e) {}
+  }
   var analyzingState = ctx.useState('analyzing', false);
   var resultState = ctx.useState('resultText', '');
   var showCfgState = ctx.useState('showCfg', false);
@@ -67,6 +71,15 @@ function Screen(ctx) {
   var filterTypeState = ctx.useState('filterType', (uiBoot.filterType !== undefined ? uiBoot.filterType : ''));
   var showCalState = ctx.useState('showCal', false);
   var memoryState = ctx.useState('memories', []);
+  // P1-3：记忆列表 setEnv 兜底持久化——跨模块实例恢复缓存（P1-4 缓存优先基础；仅空时恢复一次，防渲染循环）
+  if (!memoryState[0] || memoryState[0].length === 0) {
+    var _bootMems = [];
+    try {
+      var _cachedMems = ctx.getEnv('CACHED_MEMORIES');
+      if (_cachedMems) _bootMems = JSON.parse(_cachedMems) || [];
+    } catch(e) { _bootMems = []; }
+    if (_bootMems.length > 0) memoryState[1](_bootMems);
+  }
   var memoryLoadedState = ctx.useState('memoriesLoaded', false);
   var memoryQueryState = ctx.useState('memQuery', (uiBoot.memQuery !== undefined ? uiBoot.memQuery : ''));
   var injectionState = ctx.useState('injectionSettings', null);
@@ -80,6 +93,16 @@ function Screen(ctx) {
   var backupResultState = ctx.useState('backupResult', '');
   var backupModeState = ctx.useState('backupMode', 'merge');
   var screenPersonaState = ctx.useState('screenPersona', null);
+  // P1-3：persona 用 setEnv 兜底持久化——跨模块实例恢复已确认角色（仅空时恢复一次，防渲染循环）
+  if (!screenPersonaState[0]) {
+    try {
+      var _bootPid = ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID') || '';
+      if (_bootPid) {
+        var _bootPname = ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME') || '未命名角色';
+        screenPersonaState[1]({ id: _bootPid, name: _bootPname, type: 'character_card' });
+      }
+    } catch(e) {}
+  }
   var screenCharMemoriesState = ctx.useState('screenCharMemories', []);
 var uiSaveRef = ctx.useRef('uiSaveRef', '');
   var memoryLoadingState = ctx.useState('memLoading', false);
@@ -387,6 +410,11 @@ loadingChatsState[1](false);
                 todos: r.extracted && r.extracted.todos || [],
                 menstrual: r.extracted && r.extracted.menstrual || []
             };
+            // P1-5：requestId 防旧覆盖——非最新请求直接丢弃（防御旧响应覆盖新数据）
+            if (rid !== reqIdCounter.data) {
+              dbgUi('loadData', 'req#' + rid + ' 过期丢弃（当前#' + reqIdCounter.data + '）');
+              return false;
+            }
             dbgState('dataState', newData, dataState[0]);
             dataState[1](newData);
             if (r.injection) {
@@ -413,6 +441,8 @@ loadingChatsState[1](false);
             todos: r.extracted && r.extracted.todos || [],
             menstrual: r.extracted && r.extracted.menstrual || []
           }));
+          // P1-3：成功标记持久化（跨模块实例恢复"已加载"）
+          ctx.setEnv('MEMORY_ENGINE_DATA_LOADED', '1');
         } catch(ex) {}
         return true;
       }
@@ -432,6 +462,11 @@ loadingChatsState[1](false);
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(pC.name || ''));
       var curC = screenPersonaState[0];
       var npC = { id: String(pC.id || ''), name: String(pC.name || ''), type: String(pC.type || 'character_card') };
+      // P1-5：requestId 防旧覆盖（缓存命中路径同样校验）
+      if (rid !== reqIdCounter.persona) {
+        dbgUi('loadPersona', 'req#' + rid + ' 过期丢弃（当前#' + reqIdCounter.persona + '）');
+        return;
+      }
       if (!curC || curC.id !== npC.id || curC.name !== npC.name || curC.type !== npC.type) {
         dbgState('screenPersonaState', npC, curC);
         screenPersonaState[1](npC);
@@ -462,6 +497,11 @@ loadingChatsState[1](false);
         : { id: '', name: '', type: '' };
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(p.id || ''));
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME', String(p.name || ''));
+      // P1-5：requestId 防旧覆盖（正常路径同样校验）
+      if (rid !== reqIdCounter.persona) {
+        dbgUi('loadPersona', 'req#' + rid + ' 过期丢弃（当前#' + reqIdCounter.persona + '）');
+        return;
+      }
       // v2.1.0：相同角色不重复 setState（防渲染死循环）
       var curSP = screenPersonaState[0];
       var np = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') };
@@ -498,8 +538,16 @@ loadingChatsState[1](false);
         if (_mems.length === 0 && _oldM && _oldM.length > 0) {
           dbgUi('loadMem', 'req#' + rid + ' 空壳响应：保留已有记忆 ' + _oldM.length + ' 条');
         } else {
+          // P1-5：requestId 防旧覆盖——非最新请求直接丢弃
+          if (rid !== reqIdCounter.mem) {
+            dbgUi('loadMem', 'req#' + rid + ' 过期丢弃（当前#' + reqIdCounter.mem + '）');
+            memoryLoadingState[1](false);
+            return;
+          }
           dbgState('memoryState', _mems, _oldM);
           memoryState[1](_mems);
+          // P1-3：记忆列表 setEnv 兜底持久化（P1-4 缓存优先基础）
+          try { ctx.setEnv('CACHED_MEMORIES', JSON.stringify(_mems)); } catch(ex) {}
         }
       }
       else resultState[1]('记忆读取失败：' + ((result && result.message) || '未知错误'));

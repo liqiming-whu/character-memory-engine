@@ -1,5 +1,26 @@
 # Changelog
 
+## v2.2.0（2026-08-07，记忆注入 + P7/P8 完成版）
+
+### 核心功能：记忆自动注入（对齐官方 message_insert 模式）
+- `onPromptFinalize` 在 `before_send_to_model` 阶段：读 `last_ui_state.json` 注入配置（enabled/persist/maxMemories）→ 消息文本去除附件/XML 标签作查询词 → worker `search_memories` 按当前角色语义召回 → 构造 `<attachment id="cme_memory_bundle_...">【相关记忆】...</attachment>` 随原消息返回
+- 查询词清洗：剔除 `<attachment>` / `<workspace_attachment>` 及所有 XML 标签，只留干净消息文本（修复：工作区内容干扰召回）
+- 修复：`readInjectionSettings` 缺 `await` 导致读不到配置静默跳过（注入无效的根因）
+
+### P8 注入优化（端到端真机验证通过）
+- **① 技术降权排序**：`memoryInjectScore()` 按 importance 加权（high=1000/medium=500/其他=100），命中 `TECH_RE` 再降 -60；实测问"我的习惯"时"熟悉Python"沉底、生活习惯类浮出
+- **② snapshot 跨轮去重**：worker `search_memories` 新增 `exclude_ids`；main.js 按 chatId 读写 `memory_injection_history.json`（超 50 条截断保留最近）；实测三轮消息注入 9 条零重复
+- **③ 语义检索候选池修复**：向量召回 `k=limit*3` 太小，全局技术噪音霸占近邻名额导致角色库记忆被挤出（排除已注入后候选为空 → 注入 0 条）；改为全量取回 `k=max(limit*50, 200)` 再做角色过滤
+
+### P7 剩余优化
+- **P1-3 setEnv 兜底持久化**：screen.js 三处 useState 初始化时从 env 恢复缓存（`MEMORY_ENGINE_DATA_LOADED` / `CACHED_MEMORIES` / `MEMORY_ENGINE_ACTIVE_PERSONA_ID`），写入侧成功后同步 env
+- **P1-4 缓存优先后台刷新**：依托 P1-3 缓存，进入界面先展示缓存再后台刷新
+- **P1-5 requestId 防旧覆盖**：loadData / loadScreenPersona / loadKnowledgeMemories 三处校验 `rid !== reqIdCounter.xxx` 直接丢弃过期响应
+- **踩坑记录**：渲染函数顶层无条件 setState 恢复缓存 → 每次渲染新对象 → 无限重渲染 → UI 卡死；修复为 `if (!state[0])` 仅空状态恢复一次
+
+### 部署规范
+- 统一 `debug_install_toolpkg` 热更新烧录；worker.py 由 main.js `onAppCreate` 自动部署到 /root；烧录后需重启 app 加载新 JS 模块（Shizuku 直启）
+
 ## v2.1.7（2026-08-06，tab 切换 action 链窗口版）
 
 ### tab 切换也保持 action 链窗口（源码级修复第二刀）

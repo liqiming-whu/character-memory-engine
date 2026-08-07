@@ -282,6 +282,114 @@ async function ensureWorkerUp() {
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
+// ===== v2.2.0 记忆注入：按官方额外信息注入插件（message_insert）模式实现 =====
+// before_send_to_model 阶段召回当前角色记忆，构造 <attachment> 附加到消息返回。
+var MEMORY_INJECTION_ATTACHMENT_PREFIX = 'cme_memory_bundle_';
+async function readInjectionSettings() {
+  try {
+    var raw = await Tools.Files.read(DATA_DIR + '/last_ui_state.json');
+    if (raw && raw.content) {
+      var data = JSON.parse(raw.content);
+      var inj = data && data.data && data.data.injection;
+      if (inj && typeof inj === 'object') return inj;
+    }
+    jsLog('DEBUG', 'memory injection: 未找到注入配置 raw=' + (raw ? 'ok' : 'null'));
+  } catch (e) {
+    jsLog('DEBUG', 'memory injection: 读配置失败 ' + (e.message || String(e)));
+  }
+  return null;
+}
+function escapeXmlText(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+function collapseWs(s, maxLen) {
+  var t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  if (maxLen && t.length > maxLen) t = t.substring(0, maxLen) + '…';
+  return t;
+}
+// ===== P8② snapshot 跨轮去重：按 chatId 记录已注入记忆 id =====
+var MEMORY_INJECTION_HISTORY_FILE = DATA_DIR + '/memory_injection_history.json';
+async function readInjectionHistory() {
+  try {
+    var raw = await Tools.Files.read(MEMORY_INJECTION_HISTORY_FILE);
+    if (raw && raw.content) return JSON.parse(raw.content) || {};
+  } catch (e) {}
+  return {};
+}
+function writeInjectionHistory(h) {
+  try { Tools.Files.write(MEMORY_INJECTION_HISTORY_FILE, JSON.stringify(h), false, 'android'); } catch (e) {}
+}
+// ===== P8① 技术降权排序：importance 加权 + 技术类降权，开发记录沉底 =====
+var TECH_RE = /技术|调试|bug|报错|error|修复|配置|接口|API/;
+function memoryInjectScore(m) {
+  var imp = String((m && m.importance) || '').toLowerCase();
+  var s = imp === 'high' ? 1000 : (imp === 'medium' ? 500 : 100);
+  var text = ((m && m.title) || '') + ' ' + ((m && m.content) || '');
+  if (TECH_RE.test(text)) s -= 60;
+  return s;
+}
+async function buildMemoryInjectionText(messageText, callerCardId, chatIdParam) {
+  var settings = await readInjectionSettings();
+  if (!settings || !settings.enabled) {
+    jsLog('DEBUG', 'memory injection: 未启用或配置缺失 enabled=' + (settings && settings.enabled));
+    return null;
+  }
+  var limit = Math.min(Math.max(parseInt(settings.maxMemories, 10) || 5, 1), 20);
+  var searchText = String(messageText || '').replace(/<attachment[^>]*>[\s\S]*?<\/attachment>/g, '').replace(/<workspace_attachment[^>]*>[\s\S]*?<\/workspace_attachment>/g, '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!searchText) return null;
+  // P8②：读取本会话已注入记忆 id，传给 worker 排除
+  var chatId = String(chatIdParam || '').trim();
+  var history = await readInjectionHistory();
+  var prevIds = (chatId && history[chatId]) ? history[chatId] : [];
+  var res = await httpCall('search_memories', {
+    query: searchText.length > 200 ? searchText.substring(0, 200) : searchText,
+    limit: limit * 3,
+    character_id: callerCardId || undefined,
+    exclude_ids: prevIds.length > 0 ? prevIds : undefined
+  });
+  var memories = (res && res.memories) || [];
+  // P8①：importance 加权 + 技术类降权，重排后取前 limit 条（人物/生活记忆优先浮出）
+  memories.sort(function(a, b) { return memoryInjectScore(b) - memoryInjectScore(a); });
+  memories = memories.slice(0, limit);
+  // P8②：记录本次注入的记忆 id（同会话后续轮次不再重复注入）
+  if (chatId && memories.length > 0) {
+    var used = memories.map(function(m) { return String(m.id); });
+    var merged = history[chatId] || [];
+    used.forEach(function(id) { if (merged.indexOf(id) < 0) merged.push(id); });
+    if (merged.length > 50) merged = merged.slice(-50);
+    history[chatId] = merged;
+    writeInjectionHistory(history);
+  }
+  var lines = ['【相关记忆】', '查询: ' + searchText.substring(0, 80), '上限: ' + limit, '结果: ' + memories.length];
+  memories.forEach(function(m, i) {
+    var title = (m && m.title) || '';
+    var content = (m && m.content) || '';
+    if (!title) {
+      title = (m && m.description) ? collapseWs(m.description, 40) : ('[' + ((m && m.category) || '记忆') + ']');
+    }
+    lines.push('');
+    lines.push('#' + (i + 1));
+    lines.push('标题: ' + collapseWs(title, 80));
+    if (content) lines.push('内容: ' + collapseWs(content, 300));
+  });
+  return lines.join('\n');
+}
+async function injectMemoryAttachment(processedInput, callerCardId, chatId) {
+  try {
+    var content = await buildMemoryInjectionText(processedInput, callerCardId, chatId);
+    if (!content) return null;
+    var ts = Date.now();
+    var id = MEMORY_INJECTION_ATTACHMENT_PREFIX + ts;
+    var filename = 'Memory:' + ts;
+    var tag = '<attachment id="' + escapeXmlText(id) + '" filename="' + escapeXmlText(filename) + '" type="text/plain" size="' + content.length + '">' + escapeXmlText(content) + '</attachment>';
+    return String(processedInput || '').replace(/\s+$/, '') + ' ' + tag;
+  } catch (e) {
+    jsLog('WARN', 'memory injection 失败: ' + (e.message || String(e)));
+    return null;
+  }
+}
 async function onPromptFinalize(input) {
   var evt = (input && input.eventPayload) || {};
   var stage = String(evt.stage ?? input.eventName ?? "");
@@ -344,6 +452,16 @@ async function onPromptFinalize(input) {
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 更新 trigger 失败: ' + (e.message || String(e)));
       }
+    }
+    // v2.2.0：记忆注入（官方额外信息注入插件模式）——召回当前角色记忆附加到消息
+    try {
+      var processedInput = String(evt.processedInput ?? evt.rawInput ?? "").trim();
+      if (processedInput && callerCardId) {
+        var injected = await injectMemoryAttachment(processedInput, callerCardId, currentChatId);
+        if (injected) return injected;
+      }
+    } catch (e2) {
+      jsLog('WARN', 'onPromptFinalize 注入异常: ' + (e2.message || String(e2)));
     }
   } catch (e) {
     jsLog('WARN', 'onPromptFinalize 异常: ' + (e.message || String(e)));
