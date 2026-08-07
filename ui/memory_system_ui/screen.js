@@ -1018,6 +1018,8 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
     typeFilters.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: isActive ? colors.primary : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() { filterTypeState[1](isActive ? '' : value); } }, [
       UI.Text({ text: label, style: 'labelSmall', color: isActive ? colors.onPrimary : colors.onSurfaceVariant, fontWeight: 'bold' }),
     ]));
+    // 与角色页分类按钮一致：显式 Spacer 分隔（Row spacing 参数不可靠）
+    typeFilters.push(UI.Spacer({ width: 30 }));
   }
 
   if (currentTab === 2) {
@@ -1026,10 +1028,11 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
     makeFilterChip('支出', 'expense');
     makeFilterChip('收入', 'income');
     makeFilterChip('经期', 'menstrual');
+    typeFilters.pop();
   }
 
   var filterRow = typeFilters.length > 0 ? [
-    UI.Row({ fillMaxWidth: true, spacing: 4 }, typeFilters),
+    UI.Row({ fillMaxWidth: true, horizontalArrangement: 'center' }, typeFilters),
     UI.Spacer({ height: 4 }),
   ] : [];
 
