@@ -37,6 +37,14 @@ function render(ctx, allData, states, actions, memoryState) {
       UI.Text({ text: '删除', style: 'labelSmall', color: colors.error, fontSize: 9, fontWeight: 'bold' }),
     ]);
   }
+  // 生成记忆删除按钮（CME 单击直接删）
+  function makeDeleteMemBtn(m) {
+    return UI.Surface({ shape: { cornerRadius: 4 }, containerColor: colors.errorContainer, padding: { left: 6, right: 6, top: 2, bottom: 2 }, onClick: function() {
+      return actions.deleteMemory(m.id);
+    } }, [
+      UI.Text({ text: '删除', style: 'labelSmall', color: colors.error, fontSize: 9, fontWeight: 'bold' }),
+    ]);
+  }
 
   // 统计（v1.8.5：与上方搜索框拉开间距）
   items.push(UI.Spacer({ height: 8 }));
@@ -108,6 +116,7 @@ function render(ctx, allData, states, actions, memoryState) {
                 ]),
                 UI.Spacer({ width: 4 }),
                 dateStr ? UI.Text({ text: dateStr, style: 'labelSmall', color: colors.outlineVariant, fontSize: 9 }) : null,
+                makeDeleteMemBtn(m),
               ].filter(Boolean)),
             ]),
           ]),
