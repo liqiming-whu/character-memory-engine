@@ -796,12 +796,12 @@ def upsert_life_item(conn, params):
     item = params.get("item") or {}
     index = params.get("index")
     now = int(time.time() * 1000)
-
     rows = conn.execute(
         "SELECT * FROM memories WHERE category=? AND is_deleted=0"
-        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')"),
+        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')")
+        + " ORDER BY updated_at DESC",
         ([category] + [str(character_id)] if character_id else [category]),
-    ).fetchall()
+).fetchall()
 
     if index is not None and 0 <= int(index) < len(rows):
         target = rows[int(index)]
@@ -825,7 +825,8 @@ def delete_life_item(conn, params):
     character_id = params.get("character_id")
     rows = conn.execute(
         "SELECT id FROM memories WHERE category=? AND is_deleted=0"
-        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')"),
+        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')")
+        + " ORDER BY updated_at DESC",
         ([category] + [str(character_id)] if character_id else [category]),
     ).fetchall()
     if index is None or int(index) < 0 or int(index) >= len(rows):
@@ -840,7 +841,8 @@ def toggle_todo(conn, params):
     character_id = params.get("character_id")
     rows = conn.execute(
         "SELECT * FROM memories WHERE category='todos' AND is_deleted=0"
-        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')"),
+        + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')")
+        + " ORDER BY updated_at DESC",
         ([str(character_id)] if character_id else []),
     ).fetchall()
     if index is None or int(index) < 0 or int(index) >= len(rows):
