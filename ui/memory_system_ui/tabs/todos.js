@@ -28,21 +28,31 @@ function render(ctx, allData, states, actions) {
   // 切换待办
   async function toggleTodoItem(idOrIndex) {
     try {
-      // v2.3.0：前端统一传待办 id（精确勾选），不再依赖 index
+      // v2.3.0：前端统一传待办 id（精确勾选），不再依赖 index；失败也刷新消除过期行
       var raw = await ctx.callTool('memory_engine:toggle_todo', { id: idOrIndex });
-      if (parseResult(raw) && parseResult(raw).success) {
+      var r = parseResult(raw);
+      if (r && r.success) {
         await actions.loadData();
+      } else {
+        await actions.loadData();
+        actions.setResult('⚠️ ' + (r && r.message ? r.message : '操作失败'));
       }
     } catch(e) {}
   }
 
   // 删除
-  async function deleteItem(category, index) {
+  async function deleteItem(category, idOrIndex) {
     try {
-      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, index: index });
-      if (parseResult(raw) && parseResult(raw).success) {
+      // v2.3.0：统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
+      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
+      var r = parseResult(raw);
+      if (r && r.success) {
         await actions.loadData();
         actions.setResult('✅ 已删除');
+      } else {
+        // 条目可能已不存在（重复点击/列表过期）：刷新消除幽灵行
+        await actions.loadData();
+        actions.setResult('⚠️ ' + (r && r.message ? r.message : '删除失败'));
       }
     } catch(e) {
       actions.setResult('❌ ' + (fmtErr(e.message || String(e))));

@@ -794,11 +794,16 @@ loadingChatsState[1](false);
   }
   async function deleteItem(category, idOrIndex) {
     try {
-      // v2.3.0：前端统一传条目 id（精确删除）；worker 优先按 id 定位，不再依赖 index
+      // v2.3.0：前端统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
       var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
-      if (parseResult(raw) && parseResult(raw).success) {
+      var r = parseResult(raw);
+      if (r && r.success) {
         await loadData();
         resultState[1]('✅ 已删除');
+      } else {
+        // 条目可能已不存在（重复点击/列表过期）：刷新消除幽灵行
+        await loadData();
+        resultState[1]('⚠️ ' + (r && r.message ? r.message : '删除失败'));
       }
     } catch(e) {
       resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
