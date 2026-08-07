@@ -806,12 +806,32 @@ loadingChatsState[1](false);
   async function deleteMemory(memoryId) {
     try {
       var raw = await ctx.callTool('memory_engine:delete_memory', { id: memoryId });
-      if (parseResult(raw) && parseResult(raw).success) {
+      var r = parseResult(raw);
+      if (r && r.success) {
         await loadKnowledgeMemories();
         resultState[1]('✅ 已删除');
+      } else if (r && r.message && /memory not found/i.test(r.message)) {
+        dropMemoryFromCache(memoryId);
+        resultState[1]('✅ 已删除');
+      } else {
+        resultState[1]('❌ ' + (fmtErr(r ? r.message : '未知错误')));
       }
     } catch(e) {
-      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
+      var __em = String((e && e.message) || e);
+      if (/memory not found/i.test(__em)) {
+        dropMemoryFromCache(memoryId);
+        resultState[1]('✅ 已删除');
+      } else {
+        resultState[1]('❌ ' + (fmtErr(__em)));
+      }
+    }
+  }
+  function dropMemoryFromCache(memoryTitle) {
+    var cur = memoryState[0] || [];
+    var next = cur.filter(function(m) { return String(m.title || '') !== String(memoryTitle); });
+    if (next.length !== cur.length) {
+      memoryState[1](next);
+      try { ctx.setEnv('CACHED_MEMORIES', JSON.stringify(next)); } catch (e) {}
     }
   }
 
