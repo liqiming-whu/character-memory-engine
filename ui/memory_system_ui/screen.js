@@ -343,7 +343,12 @@ loadingChatsState[1](false);
   // ===== 动作函数 =====
   // ===== 诊断探针：区分空加载类型（A=数据没返回 / B=返回但UI没更新 / C=初始化没执行）=====
   var _dbgTs = 0;
+  var _dbgLastTool = 0;
+  var _dbgLastEnv = 0;
   // 写 dbg_ui.log（经 log_ui 工具，不经 worker）+ env 环形缓冲兜底
+  // v2.2.4（CMS v1.8.4 迁移）：工具调用与 env 缓冲均限频 500ms——
+  // 渲染风暴时从"每次渲染 1 次工具调用 + 1 次 setEnv"降到 ≤2 次/秒，
+  // 消除渲染闭包内 I/O 对 Operit 全量重绘的放大作用；关键事件日志能力保留。
   function dbgUi(tag, info) {
     try {
       var now = Date.now();
@@ -351,13 +356,19 @@ loadingChatsState[1](false);
       _dbgTs = now;
       var line = new Date(now).toISOString().replace('T', ' ').slice(5, 19) +
         ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
-      try { ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {}); } catch (e) {}
-      var old = '';
-      try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e2) {}
-      var buf = old + line;
-      var lines = buf.split('\n');
-      if (lines.length > 40) lines = lines.slice(lines.length - 40);
-      try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e3) {}
+      if (now - _dbgLastTool >= 500) {
+        _dbgLastTool = now;
+        try { ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {}); } catch (e) {}
+      }
+      if (now - _dbgLastEnv >= 500) {
+        _dbgLastEnv = now;
+        var old = '';
+        try { old = ctx.getEnv('DBG_UI_CACHE') || ''; } catch (e2) {}
+        var buf = old + line;
+        var lines = buf.split('\n');
+        if (lines.length > 40) lines = lines.slice(lines.length - 40);
+        try { ctx.setEnv('DBG_UI_CACHE', lines.join('\n')); } catch (e3) {}
+      }
     } catch (e) {}
   }
   // state 写入探针：确认 setState 是否真的执行、值是什么
