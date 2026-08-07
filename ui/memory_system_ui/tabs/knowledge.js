@@ -44,7 +44,8 @@ function render(ctx, allData, states, actions, memoryState) {
     ]);
   }
 
-  // 统计
+  // 统计（v1.8.5：与上方搜索框拉开间距）
+  items.push(UI.Spacer({ height: 8 }));
   items.push(UI.Row({ fillMaxWidth: true, horizontalArrangement: 'spaceEvenly' }, [
     UI.Surface({ shape: { cornerRadius: 10 }, containerColor: colors.errorContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 } }, [
       UI.Row({ verticalAlignment: 'center' }, [
@@ -61,7 +62,7 @@ function render(ctx, allData, states, actions, memoryState) {
       ]),
     ]),
   ]));
-  items.push(UI.Spacer({ height: 8 }));
+  items.push(UI.Spacer({ height: 4 }));  // v1.8.5：与信息列表拉近（原8）
 
   // 信息列表
   if (filteredInfo.length > 0) {
