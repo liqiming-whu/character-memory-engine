@@ -822,7 +822,17 @@ def upsert_life_item(conn, params):
 def delete_life_item(conn, params):
     category = params.get("category")
     index = params.get("index")
+    mid = params.get("id")  # 优先按 id 精确删除（前端已改传 id，根治 index 错位）
     character_id = params.get("character_id")
+    if mid is not None:
+        cur = conn.execute(
+            "UPDATE memories SET is_deleted=1 WHERE id=? AND category=? AND is_deleted=0",
+            (mid, category),
+        )
+        conn.commit()
+        if cur.rowcount > 0:
+            return {"success": True, "id": mid}
+        return {"success": False, "message": "memory not found with id=" + str(mid)}
     rows = conn.execute(
         "SELECT id FROM memories WHERE category=? AND is_deleted=0"
         + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')")
@@ -838,7 +848,18 @@ def delete_life_item(conn, params):
 
 def toggle_todo(conn, params):
     index = params.get("index")
+    mid = params.get("id")  # 优先按 id 精确勾选（与删除同源修复）
     character_id = params.get("character_id")
+    if mid is not None:
+        row = conn.execute("SELECT * FROM memories WHERE id=? AND is_deleted=0", (mid,)).fetchone()
+        if not row:
+            return {"success": False, "message": "memory not found with id=" + str(mid)}
+        new_completed = 0 if row["completed"] else 1
+        conn.execute("UPDATE memories SET completed=?, updated_at=? WHERE id=?",
+                     (new_completed, int(time.time() * 1000), mid))
+        conn.commit()
+        row2 = conn.execute("SELECT * FROM memories WHERE id=?", (mid,)).fetchone()
+        return {"success": True, "todo": row_to_obj(row2), "completed": bool(new_completed)}
     rows = conn.execute(
         "SELECT * FROM memories WHERE category='todos' AND is_deleted=0"
         + (" AND character_id=?" if character_id else " AND (character_id IS NULL OR character_id='')")
@@ -1460,7 +1481,7 @@ def import_legacy_backup(conn, params):
                 pass
 
         conn.commit()
-        return {"success": True, "imported": stats}
+        return {"success": True, "imported": stats, "stats": stats}
     except Exception as e:
         return {"success": False, "message": "import failed: " + str(e)}
     finally:
