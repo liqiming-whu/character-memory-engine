@@ -152,25 +152,36 @@ function render(ctx) {
   items.push(UI.Spacer({ height: 8 }));
 
   // 操作按钮（两行：第一行 检查状态/安装依赖/重启，第二行 查看日志/诊断）
+  // 自适应内容宽度 + 整行居中；间距用显式 Spacer（compose DSL 的 Row spacing 参数不可靠）
   function actionBtn(label, icon, bg, fg, onClick) {
-    return UI.Surface({ weight: 1, shape: { cornerRadius: 8 }, containerColor: bg, padding: { left: 8, right: 8, top: 8, bottom: 8 }, onClick: onClick }, [
-      UI.Column({ horizontalAlignment: 'center', spacing: 3 }, [
-        UI.Icon({ name: icon, tint: fg, size: 16 }),
-        UI.Text({ text: label, style: 'labelSmall', color: fg, fontWeight: 'bold' }),
+    return UI.Surface({ shape: { cornerRadius: 8 }, containerColor: bg, padding: { left: 18, right: 18, top: 9, bottom: 9 }, onClick: onClick }, [
+      UI.Row({ horizontalArrangement: 'center', verticalAlignment: 'center', spacing: 5 }, [
+        UI.Icon({ name: icon, tint: fg, size: 15 }),
+        UI.Text({ text: label, style: 'labelMedium', color: fg, fontWeight: 'bold' }),
       ]),
     ]);
   }
-  items.push(UI.Row({ fillMaxWidth: true, spacing: 8 }, [
+  items.push(UI.Row({ fillMaxWidth: true, horizontalArrangement: 'center' }, [
     actionBtn(busyState[0] ? (busyLabelState[0] || '处理中...') : '检查状态', 'refresh', colors.primary, colors.onPrimary, checkStatus),
+    UI.Spacer({ width: 22 }),
     actionBtn(busyState[0] ? (busyLabelState[0] || '处理中...') : '安装依赖', 'download', colors.primaryContainer, colors.primary, doInstall),
+    UI.Spacer({ width: 22 }),
     actionBtn(busyState[0] ? (busyLabelState[0] || '处理中...') : '重启 Worker', 'restart_alt', colors.tertiaryContainer, colors.tertiary, doRestart),
   ]));
-  items.push(UI.Spacer({ height: 8 }));
-  items.push(UI.Row({ fillMaxWidth: true, spacing: 8 }, [
+  items.push(UI.Spacer({ height: 10 }));
+  items.push(UI.Row({ fillMaxWidth: true, horizontalArrangement: 'center' }, [
     actionBtn(logLoadingState[0] ? '加载中...' : '查看日志', 'receipt_long', colors.secondaryContainer, colors.secondary, loadLogs),
+    UI.Spacer({ width: 22 }),
     actionBtn('诊断', 'bug_report', colors.errorContainer, colors.error, runDiagnosis),
   ]));
   items.push(UI.Spacer({ height: 8 }));
+
+  // 诊断长文本统一截断：超长只显示前 maxLen 字符，末尾提示完整长度（完整内容可用「查看日志」）
+  function truncateDiag(text, maxLen) {
+    var s = String(text || '');
+    if (s.length <= maxLen) return s;
+    return s.slice(0, maxLen) + '\n…（已截断，共 ' + s.length + ' 字符，完整内容请用「查看日志」）';
+  }
 
   // 插件侧诊断展示（worker 未运行时也有用）
   var dg = diagState[0];
@@ -189,11 +200,11 @@ function render(ctx) {
       } else {
         dgItems.push(UI.Text({ text: 'Worker 进程: ' + (dg.worker_up ? '运行中 (' + (dg.process_count || 0) + ' 个)' : '未运行'), style: 'labelSmall', color: dg.worker_up ? '#4CAF50' : colors.error }));
         if (dg.pids && dg.pids.length) dgItems.push(UI.Text({ text: 'PID: ' + dg.pids.join(', '), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }));
-        if (dg.env && dg.env.py) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '环境: ' + String(dg.env.py).slice(0, 300), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
-        if (dg.tmp_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + dg.tmp_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
-        if (dg.engine_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: 'engine.log 尾部:\n' + dg.engine_log_tail, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
-        if (dg.front_cache) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '前端诊断(DBG_UI_CACHE):\n' + dg.front_cache, style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
-        if (dg.messages && dg.messages.length) dgItems.push(UI.Text({ text: '诊断信息: ' + dg.messages.join('; '), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }));
+        if (dg.env && dg.env.py) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '环境: ' + truncateDiag(dg.env.py, 300), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
+        if (dg.tmp_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '启动日志(/tmp/engine_worker.log):\n' + truncateDiag(dg.tmp_log_tail, 1200), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
+        if (dg.engine_log_tail) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: 'engine.log 尾部:\n' + truncateDiag(dg.engine_log_tail, 1200), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
+        if (dg.front_cache) dgItems.push(UI.SelectionContainer({ fillMaxWidth: true }, [ UI.Text({ text: '前端诊断(DBG_UI_CACHE):\n' + truncateDiag(dg.front_cache, 1200), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }) ]));
+        if (dg.messages && dg.messages.length) dgItems.push(UI.Text({ text: '诊断信息: ' + truncateDiag(dg.messages.join('; '), 500), style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 10 }));
         if (!dg.worker_up && !dg.tmp_log_tail && !dg.engine_log_tail && !(dg.messages && dg.messages.length)) dgItems.push(UI.Text({ text: '（无诊断数据）', style: 'labelSmall', color: colors.onSurfaceVariant }));
       }
       if (dgItems.length) {
@@ -218,12 +229,12 @@ function render(ctx) {
             var active = (logFilterState[0] || '') === f[0];
             return UI.Surface({
               shape: { cornerRadius: 6 },
-              containerColor: active ? colors.primary : colors.surfaceContainerHighest,
+              containerColor: active ? colors.primary : colors.surfaceContainerHigh,
               padding: { left: 8, right: 8, top: 3, bottom: 3 },
               onClick: function () {
                 logFilterState[1](f[0]);
                 logState[1](null);
-                loadLogs();
+                return loadLogs();
               }
             }, [
               UI.Text({ text: f[1], style: 'labelSmall', color: active ? colors.onPrimary : colors.onSurface, fontWeight: active ? 'bold' : 'normal' }),

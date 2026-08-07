@@ -58,6 +58,9 @@ DATA_DIR = os.environ.get(
     "/sdcard/Download/Operit/character_memory_engine",
 )
 DB_PATH = os.environ.get("MEMORY_ENGINE_DB", os.path.join(DATA_DIR, "engine.db"))
+# 当前活动库路径：main() 启动时由 --db 参数覆盖（如 /root/character_memory_engine/engine.db），
+# deploy_status 用它报告真实读写路径（默认 DATA_DIR 只是 sdcard 部署副本）
+ACTIVE_DB_PATH = DB_PATH
 MODEL_DIR = os.environ.get("MEMORY_ENGINE_MODEL_DIR", "")
 if not MODEL_DIR or not os.path.exists(MODEL_DIR):
     _local_models = os.path.join(_SCRIPT_DIR, "models")
@@ -1023,8 +1026,9 @@ def deploy_status(conn, params):
     emb = get_embedder()
     status["vec_available"] = emb is not None
     # db
-    status["db_ok"] = os.path.exists(params.get("db") or DB_PATH)
-    status["db_path"] = params.get("db") or DB_PATH
+    db_path = params.get("db") or ACTIVE_DB_PATH
+    status["db_ok"] = os.path.exists(db_path)
+    status["db_path"] = db_path
     status["port"] = int(params.get("port") or 8765)
     return {"success": True, "status": status}
 
@@ -1736,6 +1740,8 @@ def main():
     # 一次性 CLI 模式（参考 dual-life-hub）：--cli ACTION PAYLOAD_FILE
     parser.add_argument("--cli", nargs=2, metavar=("ACTION", "PAYLOAD_FILE"))
     args = parser.parse_args()
+    global ACTIVE_DB_PATH
+    ACTIVE_DB_PATH = args.db or DB_PATH
 
     if args.cli:
         # CLI 一次性调用：读 payload 文件 → handle_action → 输出 MARKER+JSON 行

@@ -455,7 +455,8 @@ items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, contain
                   var targetChatId = chat.chatId;
                   var targetIdx = idx;
                   if (actions.setLoading) actions.setLoading(true);
-                  ctx.callTool('memory_system:analyze_saved_messages', {
+                  // 异步 action 必须返回 Promise（否则 await 后的 setState 脱离渲染窗口，UI 不刷新）
+                  return ctx.callTool('memory_system:analyze_saved_messages', {
                     chat_id: targetChatId,
                     message_index: targetIdx
                   }).then(function(raw) {

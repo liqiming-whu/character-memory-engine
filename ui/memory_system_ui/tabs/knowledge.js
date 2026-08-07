@@ -35,7 +35,7 @@ function render(ctx, allData, states, actions, memoryState) {
     return UI.Surface({ shape: { cornerRadius: 4 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: { left: 6, right: 6, top: 2, bottom: 2 }, onClick: function() {
       if (isPending) {
         actions.setPendingDelete('');
-        actions.deleteItem(category, index);
+        return actions.deleteItem(category, index);
       } else {
         actions.setPendingDelete(key);
       }

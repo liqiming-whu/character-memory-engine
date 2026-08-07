@@ -267,6 +267,15 @@ terminal.hiddenExec + worker + SQLite + JSON payload
 
 - 目标：整理并修复记忆引擎前端（memory_system_ui）现存 bug
 - 步骤：先收集已知问题（CHANGELOG 疑难清单 + 用户反馈 + 实际复现），按影响面排序修复，不盲目重构
+
+#### 收集结论（2026-08-07 走查全前端）
+- ✅ 已确认健康（无需动）：竞态防线全家桶（空壳守卫 v2.1.3 / 重试+保险丝 v2.1.4-5 / action 链窗口 v2.1.6-7 / requestId 防旧覆盖 P1-5 / 缓存优先后台刷新 P1-4 / setEnv 兜底 P1-3）；注入设置 UI（序号竞态保护 + limit 防抖 + 错误回滚 + 下划线传参 v2.2.1）；角色页 60s 缓存（personaCacheRef）；消息页分页（防重入 + 200ms 节流）；错误提示可见（resultText 顶部气泡）
+- ✅ 已修复：知识页每次进入强制重载记忆（tab3 点击 `memoryLoadedState[1](0)` 打破 60s 新鲜度窗口，每次切 tab 重复 list_characters+list_memories）→ 移除强制重置，改为 60s 新鲜度（stale-while-revalidate）；知识页记忆只读展示故安全，生活数据删除后已有 loadData 主动刷新
+- ✅ 已修复：角色页删除记忆"要点两次才消失"——**根因闭环（v2.2.2）**：删除按钮 `onClick: function() { deleteMemory(memory.id); }` 未返回 Promise，action 分发器窗口提前关闭，await 后 setState 不触发 recomposition；一行 `return` 修复。排查全程（实验0/1/2/3/6/7/8）记录于 `docs/BUG_REPORT_delete_memory_recomposition.md`，规范入 `docs/DEVELOPMENT_GUIDELINES.md`
+- ✅ 已修复（同规范排查）：deploy.js 日志筛选、screen.js 分析按钮、todos.js 删除/勾选、knowledge.js/timeline.js 删除确认、messages.js 单条分析——全部补 return Promise（共 8 处）
+- ✅ 已验证：保存修好了，刷新也在（11:11 真机）
+- 📋 暂不做（记录理由）：MemoryController 单一状态源大重构（外部审查建议）——当前散 useState + 守卫体系已稳定运行、无实际 bug 支撑，重构风险高收益不确定；待出现具体状态一致性 bug 再评估
+- 🔍 待实测验证：知识页 60s 新鲜度生效后，快速切 tab 时 loadKnowledgeMemories / loadScreenPersona 不再重复触发（日志 loadMem/persona 触发次数）
 - 已知线索：
   - 前端状态管理重构建议（外部审查：MemoryController 单一状态源 / 状态机化 / 区分 null 未加载与 [] 已加载空，见 docs/Character_Memory_Frontend_Source_Review.md）
   - 空壳竞态残留场景（P6 已修主路径，边缘场景仍需验证）

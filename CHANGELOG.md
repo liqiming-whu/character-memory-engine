@@ -1,5 +1,31 @@
 # Changelog
 
+## v2.2.2（2026-08-07，删除刷新根因闭环 + 全前端异步 action 规范修复）
+
+### 修复：角色页删除记忆"要点两次才消失"（根因闭环）
+- **现象**：点击删除后数据库删除成功、setState 已执行，但界面不刷新；需二次点击或退出重进才正确
+- **根因**：删除按钮 `onClick: function() { deleteMemory(memory.id); }` 未返回 Promise——Operit action 分发器只在等待事件处理器返回的 Promise 期间订阅 stateChange；onClick 立即返回 undefined → action 窗口关闭 → `await ctx.callTool` 之后的 setState 只写 state store、不触发 recomposition
+- **修复**（一行）：`onClick: function() { return deleteMemory(memory.id); }`，把 Promise 返回给分发器，渲染窗口保持到异步完成
+- **对照证据**：创建按钮 `onClick: createMemory`（直接传引用，自然返回 Promise）一直正常；实验 6 模拟删除（跳过工具调用、全程同步）正常；实验 8 一行 return 后立即正常
+- 排查过程完整记录：`docs/BUG_REPORT_delete_memory_recomposition.md`（实验 0/1/2/3/6/7/8，逐层排除数组 diff、mount 恢复、工具特殊处理等）
+
+### 修复：全前端同类异步 action 隐患（fire-and-forget 排查）
+按新规范全库扫描 `onClick/onLoad/onChange` 中调用异步函数但未返回 Promise 的绑定，共修复 8 处：
+- character.js：删除按钮（见上）
+- deploy.js：日志级别筛选按钮 `loadLogs()` → `return loadLogs()`
+- screen.js：记忆引擎"分析"按钮 `doAnalyze()` → `return doAnalyze()`
+- todos.js：删除确认 `deleteItem()`、待办勾选 `toggleTodoItem()`（2 处）→ 加 return
+- knowledge.js / timeline.js：删除确认 `actions.deleteItem()` → 加 return
+- messages.js：单条消息"分析" `ctx.callTool(...).then(...)` → return Promise 链
+- 复查确认：其余 onClick 均为同步 setState，无异步隐患
+
+### 开发规范（新增，见 docs/DEVELOPMENT_GUIDELINES.md）
+> 所有在异步操作完成后更新 UI 的事件处理器，都必须把 Promise 返回给宿主（`return doAsyncWork()` 或 `async () => { await doAsyncWork(); }`）。不要在事件回调中直接调用异步函数而丢弃其返回值——否则 await 后的 setState 脱离 action 渲染窗口，UI 不刷新（表现为"数据变了界面不变"的隐蔽 bug）。
+
+### 清理：诊断探针移除
+- 删除实验期的 `[R]`/`[MEM]`/`[EXP*]` 日志探针与 `delVerState` 实验 state（dbg_ui.log 噪音大幅下降）
+- 保留 `[del]` 轻量诊断日志与墓碑/本地快照防御（防旧快照覆盖、防重复触发）
+
 ## v2.2.1（2026-08-07，会话去重开关 + 注入兜底修复版）
 
 ### 新增：allowRepeatedMemorySearch 开关（对齐官方 message_insert）

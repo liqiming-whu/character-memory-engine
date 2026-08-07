@@ -54,7 +54,7 @@ function render(ctx, allData, states, actions) {
     return UI.Surface({ shape: { cornerRadius: 4 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: { left: 6, right: 6, top: 2, bottom: 2 }, onClick: function() {
       if (isPending) {
         actions.setPendingDelete('');
-        deleteItem(category, index);
+        return deleteItem(category, index);
       } else {
         actions.setPendingDelete(pendingKey);
       }
@@ -93,7 +93,7 @@ function render(ctx, allData, states, actions) {
         var key = 'todos:' + realIdx;
         pendingItems.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.surfaceVariant, padding: 8 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
-            UI.Surface({ width: 22, height: 22, shape: { cornerRadius: 11 }, containerColor: colors.surface, border: { width: 2, color: colors.error }, onClick: function() { toggleTodoItem(realIdx); } }, []),
+            UI.Surface({ width: 22, height: 22, shape: { cornerRadius: 11 }, containerColor: colors.surface, border: { width: 2, color: colors.error }, onClick: function() { return toggleTodoItem(realIdx); } }, []),
             UI.Spacer({ width: 8 }),
             UI.Column({ weight: 1 }, [
               UI.Text({ text: todo.title || '未命名', style: 'bodySmall', fontWeight: 'bold', color: colors.onSurface, maxLines: 1 }),
@@ -125,7 +125,7 @@ function render(ctx, allData, states, actions) {
         var key = 'todos:' + realIdx;
         doneItems.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.primaryContainer, alpha: 0.5, padding: 8 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
-            UI.Surface({ width: 22, height: 22, shape: { cornerRadius: 11 }, containerColor: colors.primary, onClick: function() { toggleTodoItem(realIdx); } }, [
+            UI.Surface({ width: 22, height: 22, shape: { cornerRadius: 11 }, containerColor: colors.primary, onClick: function() { return toggleTodoItem(realIdx); } }, [
               UI.Row({ fillMaxWidth: true, height: 22, horizontalArrangement: 'center', verticalAlignment: 'center' }, [UI.Icon({ name: 'check', tint: colors.onPrimary, size: 14 })]),
             ]),
             UI.Spacer({ width: 8 }),

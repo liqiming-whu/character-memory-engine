@@ -939,7 +939,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
           UI.Text({ text: (allData.todos || []).length + ' 待办 · ' + pendingTodoCount + ' 待完成 · ' + (allData.events || []).length + ' 事件', style: 'labelSmall', color: colors.onSurfaceVariant }),
         ]),
         UI.Row({ verticalAlignment: 'center' }, [
-          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) doAnalyze(); else resultState[1]('正在分析中，请稍候（约30-60秒）'); } }, [
+          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) return doAnalyze(); else resultState[1]('正在分析中，请稍候（约30-60秒）'); } }, [
             UI.Text({ text: analyzing ? '⏳ 分析中' : '🤖 分析', style: 'labelSmall', color: analyzing ? colors.error : colors.onPrimary, fontWeight: 'bold' }),
           ]),
         ]),
@@ -1039,7 +1039,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
   for (var ti = 0; ti < TAB_REGISTRY.length; ti++) {
     (function(t) {
       var isSel = currentTab === t.id;
-      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: async function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3) memoryLoadedState[1](0); if (t.id === 3 || t.id === 4) { await new Promise(function(__res) { setTimeout(__res, 600); }); } } }, [
+      tabItems.push(UI.Surface({ weight: 1, height: 58, shape: { cornerRadius: 12 }, containerColor: isSel ? colors.primaryContainer : 'transparent', onClick: async function() { tabState[1](t.id); filterTypeState[1](''); if (t.id === 3 || t.id === 4) { await new Promise(function(__res) { setTimeout(__res, 600); }); } } }, [
         UI.Column({ fillMaxWidth: true, fillMaxHeight: true, horizontalAlignment: 'center', verticalArrangement: 'center' }, [
           UI.Box({ fillMaxWidth: true, contentAlignment: 'center' }, [
             UI.Icon({ name: t.icon, tint: isSel ? colors.primary : colors.outline, size: 21 }),
@@ -1163,17 +1163,13 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
             UI.Text({ text: '恢复模式', style: 'bodySmall', color: colors.onSurface, fontWeight: 'bold' }),
             UI.Spacer({ width: 8 }),
-            UI.FilterChip({
-              label: UI.Text({ text: '合并（保留现有）', style: 'labelSmall', color: backupModeState[0] === 'merge' ? colors.primary : colors.onSurfaceVariant }),
-              selected: backupModeState[0] === 'merge',
-              onClick: function() { backupModeState[1]('merge'); }
-            }),
-            UI.Spacer({ width: 4 }),
-            UI.FilterChip({
-              label: UI.Text({ text: '覆盖', style: 'labelSmall', color: backupModeState[0] === 'overwrite' ? colors.primary : colors.onSurfaceVariant }),
-              selected: backupModeState[0] === 'overwrite',
-              onClick: function() { backupModeState[1]('overwrite'); }
-            }),
+            UI.Surface({ shape: { cornerRadius: 8 }, containerColor: backupModeState[0] === 'merge' ? colors.primary : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() { backupModeState[1]('merge'); } }, [
+              UI.Text({ text: '合并（保留现有）', style: 'labelSmall', color: backupModeState[0] === 'merge' ? colors.onPrimary : colors.onSurfaceVariant, fontWeight: 'bold' }),
+            ]),
+            UI.Spacer({ width: 8 }),
+            UI.Surface({ shape: { cornerRadius: 8 }, containerColor: backupModeState[0] === 'overwrite' ? colors.primary : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() { backupModeState[1]('overwrite'); } }, [
+              UI.Text({ text: '覆盖', style: 'labelSmall', color: backupModeState[0] === 'overwrite' ? colors.onPrimary : colors.onSurfaceVariant, fontWeight: 'bold' }),
+            ]),
           ]),
           backupResultState[0] ? UI.Text({ text: backupResultState[0], style: 'labelSmall', color: colors.onSurfaceVariant, fontSize: 11 }) : null,
         ]),
