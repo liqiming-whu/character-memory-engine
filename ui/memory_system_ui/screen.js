@@ -137,6 +137,7 @@ var triggerPollRef = ctx.useRef('triggerPoll', 0);
 var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
   var dataLoadFailCountRef = ctx.useRef('dataLoadFailCount', 0);
   var personaFailCountRef = ctx.useRef('personaFailCount', 0);
+  var personaHitAtRef = ctx.useRef('personaHitAt', 0);
   var memoryFailCountRef = ctx.useRef('memoryFailCount', 0);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
@@ -472,6 +473,10 @@ loadingChatsState[1](false);
     // v2.1.0：60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
     var pC = personaCacheRef.current || {};
     if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
+      // v2.2.4: 缓存命中路径 5 秒节流，连切角色页避免反复 setEnv/setState 开销
+      var _hitNow = Date.now();
+      if (personaHitAtRef.current && (_hitNow - personaHitAtRef.current) < 5000) return;
+      personaHitAtRef.current = _hitNow;
       dbgUi('loadPersona', 'req#' + rid + ' 缓存命中 id=' + pC.id);
       personaFailCountRef.current = 0;
       ctx.setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', String(pC.id || ''));
