@@ -64,6 +64,7 @@ function Screen(ctx) {
   }
   var analyzingState = ctx.useState('analyzing', false);
   var resultState = ctx.useState('resultText', '');
+  var renderTickState = ctx.useState('renderTick', 0); // v2.3.1: 异步 setState 不触发渲染的强制刷新 tick
   var showCfgState = ctx.useState('showCfg', false);
   var queryState = ctx.useState('query', (uiBoot.query !== undefined ? uiBoot.query : ''));
   var dateStartState = ctx.useState('dateStart', (uiBoot.dateStart !== undefined ? uiBoot.dateStart : ''));
@@ -105,6 +106,7 @@ function Screen(ctx) {
   }
   var screenCharMemoriesState = ctx.useState('screenCharMemories', []);
 var uiSaveRef = ctx.useRef('uiSaveRef', '');
+var _uiSaveTimer = null; // v2.3.1: save_ui_state 磁盘写防抖
   var memoryLoadingState = ctx.useState('memLoading', false);
   var pendingDeleteState = ctx.useState('pendingDelete', '');
   // 联系人 Tab：选中联系人同步恢复
@@ -133,6 +135,31 @@ var totalChatsState = ctx.useState('msgs_totalChats', (uiBoot.totalChats !== und
   var apiKey = cfgKey[0], setApiKey = cfgKey[1];
   var model = cfgModel[0], setModel = cfgModel[1];
 var initRef = ctx.useRef('init', false);
+  // v2.3.1: 统一结果文案——setState 后强制 tick 触发渲染（实测：异步 setState 不触发重渲染，需用户交互才显示）
+  var _resultTickTimer = null;
+  // v2.3.2b 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
+  // stateChange → 中间渲染推送平台重绘，19:48 真机生效）；此处的 renderTick 仅作窗口关闭后兜底。
+  function _operitRerender() {
+    // v2.3.2b 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
+    // stateChange → 中间渲染推送），此处的 renderTick 仅作窗口关闭后的兜底。
+    try { renderTickState[1](Date.now()); } catch (e) {}
+  }
+  function setResultText(t) {
+    resultState[1](t);
+    try {
+      if (_resultTickTimer) clearTimeout(_resultTickTimer);
+      _resultTickTimer = setTimeout(function() { _resultTickTimer = null; _operitRerender(); }, 0);
+    } catch(e) {}
+  }
+  // v2.3.2b：异步数据更新后的强制渲染 tick（平台异步 setState 不触发重绘，需用户交互才显示；
+  // 归并防抖：同一批次多次调用合并为一次，避免渲染风暴）
+  var _forceTickTimer = null;
+  function forceRenderTick(delayMs) {
+    try {
+      if (_forceTickTimer) clearTimeout(_forceTickTimer);
+      _forceTickTimer = setTimeout(function() { _forceTickTimer = null; _operitRerender(); }, delayMs || 0);
+    } catch(e) {}
+  }
 var triggerPollRef = ctx.useRef('triggerPoll', 0);
 var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
   var dataLoadFailCountRef = ctx.useRef('dataLoadFailCount', 0);
@@ -142,22 +169,79 @@ var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
+// ===== v2.3.1：全局串行调用队列（bridge 响应错配免疫，CMS 同款方案）=====
+function serialCall(toolName, params) {
+  var g = (typeof globalThis !== 'undefined' ? globalThis : window);
+  g.__cmeSerialCtx = g.__cmeSerialCtx || { p: Promise.resolve() };
+  var run = g.__cmeSerialCtx.p.then(function () {
+    return ctx.callTool(toolName, params);
+  });
+  g.__cmeSerialCtx.p = run.catch(function () {});
+  return run;
+}
 var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC || 0) + 1); // v2.1.2实验：模块级计数器——同实例/同WebView内递增，整页重载才归1
   if (!initRef.current) {
  initRef.current = true;
  dbgUi('mount', '实例创建 tab=' + (tabState[0] !== undefined ? tabState[0] : '?') + ' r=' + dbgRenderCount); // v2.1.2实验：组件实例创建标记（配合模块级计数器判断重建 vs 整页重载）
  dbgUi('init', '首次渲染，触发分析'); // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
  analyzingState[1](false);
- // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
- (async function() {
+  setResultText(''); // v2.3.1: 清持久化残留（重进不再显示上次分析结果）
+  // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
+  // v2.3.2b：延迟 8s 触发——Operit 重启早期（proot 未就绪）立即调用 trigger_analysis
+  // 会经 ensureWorkerUp 触发 hiddenExec 会话竞态（坏会话→后续拉起永久卡，19:15 实锤）；
+  // 8s 让 proot 完成重建（实测 2s）+ 保守余量。onAppCreate 另有 30s 延迟兜底。
+  setTimeout(function() {
+  (async function() {
    try {
-     var raw = await ctx.callTool('memory_engine:trigger_analysis', {});
+     var startTriggerPoll = function(countHint, hintText) {
+       triggerPollRef.current += 1;
+       var pollId = triggerPollRef.current;
+       var startMs = Date.now();
+       var maxMs = 90000;
+       var lastSnapshot = '';
+       (function pollOnce() {
+         if (pollId !== triggerPollRef.current) return;
+         if (Date.now() - startMs > maxMs) {
+           if (hintText) analyzingState[1](false); setResultText('分析状态超时，请稍后手动刷新');
+           return;
+         }
+         setTimeout(async function() {
+           try {
+             var envResult = '';
+             try { var rRaw = await serialCall('memory_engine:get_trigger_result', {}); var rRes = parseResult(rRaw); if (rRes && rRes.success && rRes.result) envResult = rRes.result; } catch(e) {}
+             if (envResult && envResult !== lastSnapshot) {
+               lastSnapshot = envResult;
+               try {
+                 var parsed = JSON.parse(envResult);
+                 if (parsed && parsed.finishedAt) {
+                    analyzingState[1](false); // v2.3.1: 分析结束→按钮复位
+                   if (parsed.success && parsed.hasData) {
+                     setResultText('后台分析完成：发现 ' + (parsed.newMessageCount || countHint || 0) + ' 条新内容');
+                     await loadData();
+                   } else if (parsed.success && !parsed.hasData) {
+                     setResultText('后台分析完成：未发现可提取内容');
+                   } else {
+                     setResultText('分析失败：' + (parsed.error || '未知错误'));
+                   }
+                   return;
+                 }
+               } catch(pe) {}
+             }
+             pollOnce();
+           } catch(e) {
+             pollOnce();
+           }
+         }, 3000);
+       })();
+     };
+     var raw = await serialCall('memory_engine:trigger_analysis', {});
      var r = parseResult(raw);
      dbgUi('init', 'trigger_analysis 返回 started=' + (r && r.started) + ' skipped=' + (r && r.skipped) + ' success=' + (r && r.success));
      if (r && r.started) {
-       // 异步分析已启动 → 显示"分析中"并轮询刷新数据
-       var __estSec = Math.max(15, Math.min(120, Math.ceil((r.newMessageCount || 0) * 3)));
-       resultState[1]('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计约 ' + __estSec + ' 秒），你可以先做其他事，分析完成后将自动刷新');
+        // 异步分析已启动 → 显示"分析中"并轮询刷新数据
+        var __estSec = Math.max(15, Math.min(120, Math.ceil((r.newMessageCount || 0) * 3)));
+        setResultText('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计约 ' + __estSec + ' 秒），你可以先做其他事，分析完成后将自动刷新');
+        analyzingState[1](true); // v2.3.1: 自动分析启动→按钮显示分析中
        triggerPollRef.current += 1;
        var pollId = triggerPollRef.current;
        var startMs = Date.now();
@@ -166,27 +250,28 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
        (function pollOnce() {
          if (pollId !== triggerPollRef.current) return; // 已被新触发取代
          if (Date.now() - startMs > maxMs) {
-           resultState[1]('分析超时，请稍后手动刷新');
+           analyzingState[1](false); setResultText('分析超时，请稍后手动刷新');
            return;
          }
          setTimeout(async function() {
            try {
              // 读 env 看分析是否结束
              var envResult = '';
-             try { envResult = ctx.getEnv('MEMORY_SYSTEM_TRIGGER_RESULT') || ''; } catch(e) {}
+             try { var rRaw = await serialCall('memory_engine:get_trigger_result', {}); var rRes = parseResult(rRaw); if (rRes && rRes.success && rRes.result) envResult = rRes.result; } catch(e) {}
              if (envResult && envResult !== lastSnapshot) {
                lastSnapshot = envResult;
                try {
                  var parsed = JSON.parse(envResult);
                  if (parsed && parsed.finishedAt) {
+                    analyzingState[1](false); // v2.3.1: 分析结束→按钮复位
                    // 分析已结束
                    if (parsed.success && parsed.hasData) {
+                     setResultText('后台分析完成：发现 ' + (parsed.newMessageCount || 0) + ' 条新内容');
                      await loadData();
-                     resultState[1]('后台分析完成：发现 ' + (parsed.newMessageCount || 0) + ' 条新内容');
                    } else if (parsed.success && !parsed.hasData) {
-                     resultState[1]('后台分析完成：未发现可提取内容');
+                     setResultText('后台分析完成：未发现可提取内容');
                    } else {
-                     resultState[1]('分析失败：' + (parsed.error || '未知错误'));
+                     setResultText('分析失败：' + (parsed.error || '未知错误'));
                    }
                    return;
                  }
@@ -200,12 +285,18 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
        })();
      } else if (r && r.skipped) {
        // 没有新内容：静默（也可选显示一句提示）
-       resultState[1]('无新对话内容 (' + (r.lastAnalyzedAt ? '上次分析：' + new Date(r.lastAnalyzedAt).toLocaleString() : '首次检测') + ')');
+       analyzingState[1](false); setResultText('无新对话内容 (' + (r.lastAnalyzedAt ? '上次分析：' + new Date(r.lastAnalyzedAt).toLocaleString() : '首次检测') + ')');
      } else if (r && !r.success) {
-       resultState[1]('检测失败：' + (fmtErr(r.message || r.error || '未知')));
-     }
-   } catch(e) {}
+       setResultText('检测失败：' + (fmtErr(r.message || r.error || '未知')));
+     } else {
+       // v2.3.1：响应异常（bridge 错配/形状未知）→ 保守启动兜底轮询，分析完成仍能刷新
+       dbgUi('init', '响应异常（started/skipped 缺失），启动兜底轮询');
+       setResultText('正在检测对话内容…');
+       startTriggerPoll(0, '正在检测对话内容…');
+    }
+  } catch(e) {}
  })();
+  }, 8000);
 }
 
   // 首次状态为空时读取一次；后续由根节点 onLoad、分析完成或用户操作明确刷新。
@@ -274,7 +365,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
     analyzedChatsInitRef.current = true;
     (async function() {
       try {
-        var raw = await ctx.callTool('memory_engine:get_analyzed_chats', {});
+        var raw = await serialCall('memory_engine:get_analyzed_chats', {});
         var r = parseResult(raw);
         if (r && r.success && r.chats) {
           analyzedChatsState[1](r.chats);
@@ -317,7 +408,7 @@ offsetState[1](0);
 try {
 // 注意：listChat 不支持 offset，所以一次性拉大数（200），
 // 真实对话数通过 totalCount 显示给用户，不再分页。
-var raw = await ctx.callTool('chat_exporter:list_chats_brief', {
+var raw = await serialCall('chat_exporter:list_chats_brief', {
 limit: 200,
 sort_order: 'desc'
 });
@@ -363,7 +454,7 @@ loadingChatsState[1](false);
         ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
       if (now - _dbgLastTool >= 500) {
         _dbgLastTool = now;
-        try { ctx.callTool('memory_engine:log_ui', { line: line }).catch(function() {}); } catch (e) {}
+        try { serialCall('memory_engine:log_ui', { line: line }).catch(function() {}); } catch (e) {}
       }
       if (now - _dbgLastEnv >= 500) {
         _dbgLastEnv = now;
@@ -407,7 +498,7 @@ loadingChatsState[1](false);
     var rid = nextReqId('data');
     dbgUi('loadData', 'req#' + rid + ' 触发');
     try {
-      var raw = await ctx.callTool('memory_engine:load_life_data', {});
+      var raw = await serialCall('memory_engine:load_life_data', {});
       var r = parseResult(raw);
       dbgUi('loadData', 'req#' + rid + ' 返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
       if (r && r.success) {
@@ -450,6 +541,7 @@ loadingChatsState[1](false);
             }
             dbgState('dataState', newData, dataState[0]);
             dataState[1](newData);
+            forceRenderTick(0); // v2.3.2b: 异步更新数据后强制渲染（否则需切 tab 才显示分析结果）
             if (r.injection) {
               // 竞态保护：用户刚保存过（3秒内），跳过 loadData 的旧值覆盖
               if (Date.now() - (lastInjectionSaveRef.current || 0) > 3000) {
@@ -511,7 +603,7 @@ loadingChatsState[1](false);
       return;
     }
     try {
-      var pRaw = await ctx.callTool('memory_engine:list_characters', {});
+      var pRaw = await serialCall('memory_engine:list_characters', {});
       var pResult = parseResult(pRaw);
       var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
       dbgUi('loadPersona', 'req#' + rid + ' 返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
@@ -572,11 +664,11 @@ loadingChatsState[1](false);
     dbgUi('loadMem', 'req#' + rid + ' 触发');
     memoryLoadingState[1](true);
     try {
-      var personaRaw = await ctx.callTool('memory_engine:list_characters', {});
+      var personaRaw = await serialCall('memory_engine:list_characters', {});
       var personaResult = parseResult(personaRaw);
       var personaId = personaResult && personaResult.success && personaResult.characters && personaResult.characters.length > 0
         ? String(personaResult.characters[0].id || '') : '';
-      var raw = await ctx.callTool('memory_engine:list_memories', {
+      var raw = await serialCall('memory_engine:list_memories', {
         limit: 100,
         character_id: personaId || undefined
       });
@@ -601,10 +693,10 @@ loadingChatsState[1](false);
           try { ctx.setEnv('CACHED_MEMORIES', JSON.stringify(_mems)); } catch(ex) {}
         }
       }
-      else resultState[1]('记忆读取失败：' + (fmtErr((result && result.message) || '未知错误')));
+      else setResultText('记忆读取失败：' + (fmtErr((result && result.message) || '未知错误')));
     } catch(e) {
       dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (fmtErr(e.message || String(e))));
-      resultState[1]('记忆读取失败：' + (fmtErr(e.message || String(e))));
+      setResultText('记忆读取失败：' + (fmtErr(e.message || String(e))));
     }
     // v2.1.4 P0-2：成功才写时间戳（空壳且无缓存时置 0，与 data 同款自动重试闭环）
     var _memsOk = result && result.success && (result.memories || []).length > 0;
@@ -626,7 +718,7 @@ loadingChatsState[1](false);
     await ctx.setEnv('MEMORY_SYSTEM_ENDPOINT', endpoint);
     await ctx.setEnv('MEMORY_SYSTEM_KEY', apiKey);
     await ctx.setEnv('MEMORY_SYSTEM_MODEL', model);
-    resultState[1]('✅ 配置已保存');
+    setResultText('✅ 配置已保存');
   }
 
   async function saveInjectionSettings(patch) {
@@ -649,21 +741,21 @@ loadingChatsState[1](false);
         allow_repeated_memory_search: next.allowRepeatedMemorySearch
       };
       dbgUi('saveInjection', 'callTool payload=' + JSON.stringify(toolPayload));
-      var raw = await ctx.callTool('memory_engine:set_injection_settings', toolPayload);
+      var raw = await serialCall('memory_engine:set_injection_settings', toolPayload);
       var r = parseResult(raw);
       if (seq !== injectionSaveSeqRef.current) return; // 已有更新的保存请求，旧响应不覆盖
       if (r && r.success && r.injection) {
         injectionState[1](r.injection);
         lastInjectionSaveRef.current = Date.now();
-        resultState[1]('✅ 记忆注入设置已保存');
+        setResultText('✅ 记忆注入设置已保存');
       } else {
         injectionState[1](current);
-        resultState[1]('❌ ' + (fmtErr((r && r.message) || '注入设置保存失败')));
+        setResultText('❌ ' + (fmtErr((r && r.message) || '注入设置保存失败')));
       }
     } catch (e) {
       if (seq !== injectionSaveSeqRef.current) return;
       injectionState[1](current);
-      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
+      setResultText('❌ ' + (fmtErr(e.message || String(e))));
     }
   }
 
@@ -685,22 +777,22 @@ loadingChatsState[1](false);
   async function saveInjectionLimitWith(rawValue) {
     var limit = parseInt(rawValue, 10);
     if (!Number.isFinite(limit) || limit < 1 || limit > 20) {
-      resultState[1]('❌ 注入记忆条数必须是 1-20 的整数');
+      setResultText('❌ 注入记忆条数必须是 1-20 的整数');
       return;
     }
     injectionSavingState[1](true);
     try {
-      var raw = await ctx.callTool('memory_engine:set_injection_settings', { max_memories: limit });
+      var raw = await serialCall('memory_engine:set_injection_settings', { max_memories: limit });
       var r = parseResult(raw);
       if (r && r.success && r.injection) {
         injectionState[1](r.injection);
         injectionLimitInputState[1](String(r.injection.maxMemories));
-        resultState[1]('✅ 注入记忆条数已保存');
+        setResultText('✅ 注入记忆条数已保存');
       } else {
-        resultState[1]('❌ ' + (fmtErr((r && r.message) || '注入记忆条数保存失败')));
+        setResultText('❌ ' + (fmtErr((r && r.message) || '注入记忆条数保存失败')));
       }
     } catch (e) {
-      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
+      setResultText('❌ ' + (fmtErr(e.message || String(e))));
     }
     injectionSavingState[1](false);
   }
@@ -711,7 +803,7 @@ loadingChatsState[1](false);
     backupBusyState[1](true);
     backupResultState[1]('🔄 正在导出备份...');
     try {
-      var raw = await ctx.callTool('memory_engine:backup_engine', { reason: 'manual' });
+      var raw = await serialCall('memory_engine:backup_engine', { reason: 'manual' });
       var r = parseResult(raw);
       if (r && r.success) {
         backupResultState[1]('✅ 备份已导出：' + (r.fileName || '') + '\n路径：' + (r.path || ''));
@@ -750,7 +842,7 @@ loadingChatsState[1](false);
       var isNewFormat = false;
       var inspMsg = '';
       try {
-        var inspRaw = await ctx.callTool('memory_engine:inspect_engine', { path: filePath });
+        var inspRaw = await serialCall('memory_engine:inspect_engine', { path: filePath });
         var insp = parseResult(inspRaw);
         if (insp && insp.success && insp.valid === true) {
           isNewFormat = true;
@@ -764,7 +856,7 @@ loadingChatsState[1](false);
       if (isNewFormat) {
         // 新格式（engine.db + manifest v1）：直接恢复
         backupResultState[1]('🔄 备份有效，正在恢复（' + (backupModeState[0] === 'overwrite' ? '覆盖' : '合并') + '模式）...');
-        var resRaw = await ctx.callTool('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
+        var resRaw = await serialCall('memory_engine:restore_engine', { path: filePath, mode: backupModeState[0] });
         var res = parseResult(resRaw);
         if (res && res.success) {
           backupResultState[1]('✅ 恢复完成（' + (res.mode || 'merge') + ' 模式' + (res.fileCount !== undefined ? '，' + res.fileCount + ' 个文件' : '') + '）');
@@ -776,7 +868,7 @@ loadingChatsState[1](false);
         // 新格式校验失败：尝试旧版本（v1.5.x）数据导入（data/<cat>.json 结构）
         backupResultState[1]('🔄 新格式校验未通过（' + (inspMsg || '格式不符') + '），尝试按旧版本数据导入...');
         try {
-          var impRaw = await ctx.callTool('memory_engine:import_legacy_backup', { path: filePath });
+          var impRaw = await serialCall('memory_engine:import_legacy_backup', { path: filePath });
           var imp = parseResult(impRaw);
           if (imp && imp.success) {
             var st = imp.stats || imp.imported || {};
@@ -797,10 +889,10 @@ loadingChatsState[1](false);
 
   async function doAnalyze() {
     analyzingState[1](true);
-    resultState[1]('分析中（约30-80秒，可切换页面，分析会继续）');
+    setResultText('分析中（约30-80秒，可切换页面，分析会继续）');
     var analyzeTimer = setTimeout(function() {
       analyzingState[1](false);
-      resultState[1]('分析仍在后台进行（约30-80秒），请稍后刷新角色页查看');
+      setResultText('分析仍在后台进行（约30-80秒），请稍后刷新角色页查看');
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     }, 120000);
     try {
@@ -809,7 +901,7 @@ loadingChatsState[1](false);
       var actId = '';
       var actName = '';
       try {
-        var cRaw = await ctx.callTool('memory_engine:list_characters', {});
+        var cRaw = await serialCall('memory_engine:list_characters', {});
         var cR = parseResult(cRaw);
         if (cR && cR.success && cR.characters && cR.characters.length > 0) {
           actId = String(cR.characters[0].id || '');
@@ -820,7 +912,7 @@ loadingChatsState[1](false);
         try { actId = String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID') || ''); } catch (e) {}
         try { actName = String(ctx.getEnv('MEMORY_ENGINE_ACTIVE_PERSONA_NAME') || ''); } catch (e) {}
       }
-      var raw = await ctx.callTool('memory_engine:analyze_chat', {
+      var raw = await serialCall('memory_engine:analyze_chat', {
         character_id: actId || undefined,
         persona_name: actName || ''
       });
@@ -828,15 +920,15 @@ loadingChatsState[1](false);
       if (r && r.success) {
         await loadData();
         var st = r.stats || {};
-        resultState[1]('✅ 分析完成：提取 ' + (st.items || 0) + ' 条（合并 ' + (st.deduped || 0) + ' 条重复）');
+        setResultText('✅ 分析完成：提取 ' + (st.items || 0) + ' 条（合并 ' + (st.deduped || 0) + ' 条重复）');
       } else {
-        resultState[1](fmtErr((r && r.message) || '❌ 分析失败'));
+        setResultText(fmtErr((r && r.message) || '❌ 分析失败'));
       }
       // v2.1.0：分析结束（成功/失败）标记全局时间戳，角色页下次进入强制刷新最新数据
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     } catch (e) {
       // v2.1.0：Operit 工具调用约 12 秒超时，但 worker 后台仍在分析（可达 80 秒）
-      resultState[1]('分析请求超时，后台仍在进行（约30-80秒），请稍后刷新角色页查看');
+      setResultText('分析请求超时，后台仍在进行（约30-80秒），请稍后刷新角色页查看');
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     }
     clearTimeout(analyzeTimer);
@@ -845,20 +937,20 @@ loadingChatsState[1](false);
   async function deleteItem(category, idOrIndex) {
     try {
       // v2.3.0：前端统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
-      var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
+      var raw = await serialCall('memory_engine:delete_life_item', { category: category, id: idOrIndex });
       var r = parseResult(raw);
       // v2.3.1：成功或失败都先本地移除该行——连点不再命中过期行；loadData 后台刷新兜底（300ms 防抖已覆盖）
       dropLifeItemFromData(category, idOrIndex);
       if (r && r.success) {
         await loadData();
-        resultState[1]('✅ 已删除');
+        setResultText('✅ 已删除');
       } else {
         // 条目可能已不存在（重复点击/列表过期）：刷新消除幽灵行
         await loadData();
-        resultState[1]('⚠️ ' + (r && r.message ? r.message : '删除失败'));
+        setResultText('⚠️ ' + (r && r.message ? r.message : '删除失败'));
       }
     } catch(e) {
-      resultState[1]('❌ ' + (fmtErr(e.message || String(e))));
+      setResultText('❌ ' + (fmtErr(e.message || String(e))));
     }
   }
 
@@ -880,25 +972,25 @@ loadingChatsState[1](false);
   }
   async function deleteMemory(memoryId) {
     try {
-      var raw = await ctx.callTool('memory_engine:delete_memory', { id: memoryId });
+      var raw = await serialCall('memory_engine:delete_memory', { id: memoryId });
       var r = parseResult(raw);
       // v2.3.1：成功或失败都先本地移除该条（按 id）——连点不再命中过期行；loadMem 防抖刷新兜底
       dropMemoryFromCache(memoryId);
       if (r && r.success) {
         await loadKnowledgeMemories();
-        resultState[1]('✅ 已删除');
+        setResultText('✅ 已删除');
       } else if (r && r.message && /memory not found/i.test(r.message)) {
-        resultState[1]('✅ 已删除');
+        setResultText('✅ 已删除');
       } else {
-        resultState[1]('❌ ' + (fmtErr(r ? r.message : '未知错误')));
+        setResultText('❌ ' + (fmtErr(r ? r.message : '未知错误')));
       }
     } catch(e) {
       var __em = String((e && e.message) || e);
       if (/memory not found/i.test(__em)) {
         dropMemoryFromCache(memoryId);
-        resultState[1]('✅ 已删除');
+        setResultText('✅ 已删除');
       } else {
-        resultState[1]('❌ ' + (fmtErr(__em)));
+        setResultText('❌ ' + (fmtErr(__em)));
       }
     }
   }
@@ -959,15 +1051,20 @@ uiSaveRef.current = __uiSnapshot;
 // 主路径：ctx.setEnv 同步写入；下次进入 getEnv 同步读取，无需异步等待
 // 这是 msg_watcher 的 CACHED_ALL_DATA 同款模式
 try { ctx.setEnv('MEMORY_ENGINE_UI_STATE', __uiSnapshot); } catch(__eSet) {}
-// 兜底：异步触发工具保存到磁盘，保证重启后也能恢复
+// 兜底：异步触发工具保存到磁盘，保证重启后也能恢复（v2.3.1：防抖 500ms，渲染风暴时不放大 I/O）
+if (!_uiSaveTimer) {
+_uiSaveTimer = setTimeout(function() {
+_uiSaveTimer = null;
 try {
-var __uiParams = JSON.stringify({ state_json: __uiSnapshot });
+var __uiParams2 = JSON.stringify({ state_json: uiSaveRef.current || __uiSnapshot });
 if (typeof NativeInterface !== 'undefined' && typeof NativeInterface.callTool === 'function') {
-NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
+NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams2);
 } else if (typeof Operit !== 'undefined' && Operit.NativeInterface && typeof Operit.NativeInterface.callTool === 'function') {
-Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
+Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams2);
 }
 } catch(__eSave) {}
+}, 500);
+}
 }
 } catch (e) {}
 
@@ -1053,7 +1150,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
           UI.Text({ text: (allData.todos || []).length + ' 待办 · ' + pendingTodoCount + ' 待完成 · ' + (allData.events || []).length + ' 事件', style: 'labelSmall', color: colors.onSurfaceVariant }),
         ]),
         UI.Row({ verticalAlignment: 'center' }, [
-          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) return doAnalyze(); else resultState[1]('正在分析中，请稍候（约30-60秒）'); } }, [
+          UI.Surface({ shape: { cornerRadius: 12 }, containerColor: analyzing ? colors.errorContainer : colors.primary, padding: { left: 10, right: 10, top: 4, bottom: 4 }, onClick: function() { if (!analyzing) return doAnalyze(); else setResultText('正在分析中，请稍候（约30-60秒）'); } }, [
             UI.Text({ text: analyzing ? '⏳ 分析中' : '🤖 分析', style: 'labelSmall', color: analyzing ? colors.error : colors.onPrimary, fontWeight: 'bold' }),
           ]),
         ]),
@@ -1321,10 +1418,13 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams);
       try { await loadData(); } catch (__e) {}
     }
     // 保持 action 链窗口：覆盖 render 调度块触发的 persona/memory/角色页等异步加载的 setState 推送
-    await new Promise(function(__res) { setTimeout(__res, 600); });
+    // v2.3.2b：延长到 120s——onLoad 是 action 分发，期间订阅 stateChange → 任何 setState（含
+    // 自动分析 setTimeout 链）都会触发中间渲染推送平台重绘（源码级机制；dispatch 自调不可达平台，
+    // 19:45 实证 sendIntermediateResult 未注入）。120s 覆盖自动分析周期，结束后窗口自动关闭。
+    await new Promise(function(__res) { setTimeout(__res, 120000); });
   } }, [
-    headerCard,
-    UI.Spacer({ height: 6 }),
+  headerCard,
+  UI.Spacer({ height: 6 }),
   ].concat((currentTab === 2 || currentTab === 3) ? [searchBar] : []).concat(currentTab === 2 ? calPanel : []).concat(filterRow).concat([
     UI.LazyColumn({ fillMaxWidth: true, weight: 1, spacing: 4 }, tabContent),
     UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 16 }, containerColor: colors.surfaceVariant, padding: 5 }, [

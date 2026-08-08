@@ -1,4 +1,16 @@
 # Changelog
+## v2.3.2（2026-08-08，ANR 闪退修复 + 项目 venv 改造）
+### 修复：worker 离线时 32s 探测阻塞 → UI 卡死 / Operit 闪退
+- **现象**：实机两次卡住 + app 闪退；`dbg_call.log` 实测 `load_life_data ms=32218` / `save_ui_state ms=32271` / `list_memories ms=32128` 各卡 32s 后失败，误报「未找到可用的 python3」（实际 python 存在）
+- **根因链**：① worker 绑定 proot 实例，proot 被平台回收时 worker 连带被杀（setsid 无效）② `detectPython` 用 hiddenExec 探测，proot 未就绪/会话失效时每候选卡 8s（失败漂移 key 重试 6s），4 候选 ≈32-48s ③ 32s 同步阻塞堵平台回调队列 → UI 卡死 → ANR → 闪退
+- **修复**：`detectPython` 改用 `Tools.Files.exists(path, 'linux')` 毫秒级判存在，彻底移除 hiddenExec 探测路径；候选改为项目 venv → 旧全局 venv → 系统 python3
+### 改造：依赖只装项目 venv（不再写入系统 python）
+- `worker.py` 新增 `VENV_DIR`/`VENV_PY`（基于脚本目录 `.venv`）；`deploy_install` 重写为 `python3 -m venv` 创建 → venv 解释器 probe → venv 的 pip 安装（无 `--break-system-packages`）→ venv 内二次确认 → 提示重启 Worker
+- `deploy_status` venv 检查优先报告项目 venv；所有手动启动命令/README 更新为 `/root/character_memory_engine/.venv/bin/python3.12`
+- 实机验证：`deploy_install` 48s 创建 venv + 安装三依赖 PASS；项目 venv 重启 worker `vec_available: true` PASS
+### 遗留
+- 真机回归（重启 Operit 后验证快速失败路径）；任务②剩余项（worker 离线快速失败 / triggerAnalysis 就绪检查 / analyzeChat 失败推进水位线）
+
 ## v2.3.0（2026-08-08，渲染性能大修 + 删除链路最终闭环）
 ### 性能：渲染风暴 I/O 归零（dbgUi 限频 500ms，`89076ea`）
 - **现象**：连续切 tab / 连续删除时 UI 卡死（实测 13 秒 21 次渲染，每次渲染发 1 次 log_ui 工具调用 + 1 次 setEnv，工具调用往返又触发状态变化 → 恶性循环）

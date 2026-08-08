@@ -112,6 +112,7 @@ METADATA
             { "name": "chat_id", "type": "string", "required": false, "description": "对话ID；不传取 trigger.json 记录的当前对话" },
             { "name": "character_id", "type": "string", "required": false, "description": "角色卡ID" }
         ]},
+        { "name": "get_trigger_result", "description": { "zh": "读取最近一次后台分析的完成结果（文件通道，工具脚本无 setEnv）", "en": "Get last trigger analysis result (file channel)" }, "parameters": []},
         { "name": "set_injection_settings", "description": { "zh": "设置记忆注入配置（启用/持久化/最大条数/是否按会话去重）", "en": "Set memory injection settings" }, "parameters": [
             { "name": "enabled", "type": "boolean", "required": false, "description": "是否启用注入" },
             { "name": "persist", "type": "boolean", "required": false, "description": "是否跨对话持久化" },
@@ -199,7 +200,7 @@ async function httpCall(action, payload) {
       'worker 调用超时。'
     );
   } catch (e) {
-    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
   var text = String(resp && (resp.content || resp.body || '') || '');
   var data = null;
@@ -252,6 +253,18 @@ async function deployWorkerToData() {
 // 尝试拉起常驻 worker（幂等：已在线则跳过；force=true 时强制完整重启）。
 // python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
 async function ensureWorkerUp(force) {
+  // v2.3.2b：冷启动/坏会话窗口保护——hiddenExec 失败后 30s 内快速失败，绝不碰 hiddenExec。
+  // 背景：Operit 重启早期（proot 未就绪）调用 hiddenExec 会创建坏会话 → 后续同 key 调用永久排队卡死
+  // （19:15:51 实锤：save_ui_state 卡 35.1s、onAppCreate 报 hiddenExec 二次超时）。
+  var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
+  try {
+    var bf = Tools.Files.read(BLOCK_FILE);
+    var bfText = (bf && (bf.content || bf.text)) || '';
+    var bfTs = parseInt(bfText, 10) || 0;
+    if (bfTs > Date.now() && !force) {
+      return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
+    }
+  } catch (e) {}
   // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
   var LOCK = DATA_DIR + '/logs/launching.lock';
   try {
@@ -269,11 +282,11 @@ async function ensureWorkerUp(force) {
   // 先确保 worker.py 等在 DATA_DIR
   try { await deployWorkerToData(); } catch (e) {}
   var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 
   var pyCmd = await detectPython();
   if (!pyCmd) {
-    return { success: false, message: '未找到可用的 python3。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    return { success: false, message: '未找到可用的 python3。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
 
   // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
@@ -288,7 +301,7 @@ async function ensureWorkerUp(force) {
     "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
     "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
     "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
+    "PY=" + pyCmd + "; [ -x \"$PY\" ] || PY=/root/.venv/bin/python3.12; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || { echo NO_PYTHON; exit 1; }; setsid \"$PY\" " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (typeof terminal.hiddenExec === 'function') {
@@ -300,34 +313,31 @@ async function ensureWorkerUp(force) {
       try { await terminal.close(sess.sessionId); } catch (e) {}
     }
   } catch (e) {
-    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e2) {}
+    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
-  await new Promise(function (r) { setTimeout(r, 3000); });
-  var ping2 = await httpCall('ping_worker', {});
+  // v2.3.2b：拉起后轮询 ping（每 2s，最长 15s）替代固定 3s 等待——
+  // worker 启动需 7-8s（proot 2s + onnx 模型加载 5s），固定 3s 必然误报"拉起后未响应"
+  // （2026-08-08 19:10 实锤：启动命令发出后 worker 实际 20s 内就绪，3s ping 误报失败）。
+  var ping2 = null;
+  var _pollDeadline = Date.now() + 15000;
+  while (Date.now() < _pollDeadline) {
+    await new Promise(function (r) { setTimeout(r, 2000); });
+    ping2 = await httpCall('ping_worker', {});
+    if (ping2 && ping2.success) break;
+  }
   try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
   if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+  try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 }
 
-// 探测可用 python3：优先 proot venv（完整向量），备选系统 python3。
-// 用 shell 判断文件存在且可执行（不依赖 bash -lc 包装的 test -x 输出解析，
-// 直接 ls 判断路径存在）
+// v2.3.2b：detectPython 不再做任何 JS 侧文件探测——
+// ① hiddenExec 探测会卡 8s×N（32s 阻塞 → ANR/闪退，2026-08-08 实锤）；
+// ② Tools.Files.exists(...,'linux') 在当前 Operit 版本不可靠（实测返回空对象，误报 python3 不存在）。
+// python 路径由 deploy_install 固定创建（项目 venv），存在性校验下沉到启动脚本 bash [ -x ]（毫秒级）。
 async function detectPython() {
-  var candidates = [
-    '/root/.venv/bin/python3.12',
-    '/root/.venv/bin/python3',
-    '/usr/bin/python3',
-    'python3'
-  ];
-  for (var i = 0; i < candidates.length; i++) {
-    try {
-      // 显式标记输出：ls 的 stderr（含路径名）会被 grabOut 兜回导致误判，只认 PY_OK
-      var probe = "if [ -x " + candidates[i] + " ]; then echo PY_OK; else echo PY_NO; fi";
-      var r = await withTimeout(execSh(probe), 8000, 'python 探测超时。');
-      if (String(r).indexOf('PY_OK') >= 0) return candidates[i];
-    } catch (e) {}
-  }
-  return '';
+  return ROOT_DIR + '/.venv/bin/python3.12';
 }
 
 // hiddenExec 会话策略（v1.0.6+多轮实测）：
@@ -435,7 +445,31 @@ exports.deploy_status = deployStatus;
 exports.deploy_install = deployInstall;
 exports.deploy_restart = deployRestart;
 exports.save_ui_state = makeTool("save_ui_state");
+
+// ===== v2.3.1：分析完成结果落文件（工具脚本环境无 setEnv，env 通道不可用；改用文件通道）=====
+async function writeTriggerResultFile(obj) {
+    var p = '/sdcard/Download/Operit/character_memory_engine/trigger_result.json';
+    var tmp = p + '.tmp';
+    try {
+        await Tools.Files.write(tmp, JSON.stringify(obj, null, 2), false, 'android');
+        await Tools.Files.move(tmp, p);
+    } catch (e) {
+        try { await Tools.Files.write(p, JSON.stringify(obj, null, 2), false, 'android'); } catch (e2) {}
+    }
+}
+async function getTriggerResult() {
+    try {
+        var raw = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger_result.json');
+        if (raw && raw.content) {
+            var parsed = JSON.parse(raw.content);
+            if (parsed && typeof parsed === 'object') return finish({ success: true, result: JSON.stringify(parsed) });
+        }
+    } catch (e) {}
+    return finish({ success: true, result: '' });
+}
+
 exports.trigger_analysis = triggerAnalysis;
+exports.get_trigger_result = getTriggerResult;
 exports.set_injection_settings = makeTool("set_injection_settings");
 exports.backup_engine = makeTool("backup_engine");
 exports.inspect_engine = makeTool("inspect_engine");
@@ -450,11 +484,8 @@ async function analyzeChat(params) {
         // v2.1.0：优先用 trigger.json 的当前对话（main.js 每次消息都会更新，最可靠）
         if (!chatId) {
             try {
-                var tr = await Tools.Files.read(DATA_DIR + '/trigger.json');
-                if (tr && tr.content) {
-                    var tj = JSON.parse(tr.content);
-                    if (tj && tj.chatId) chatId = String(tj.chatId);
-                }
+                var tj = await readTriggerJson();
+                if (tj && tj.chatId) chatId = String(tj.chatId);
             } catch (e) {}
         }
         // 未指定对话时，取最近对话（listChats 排序参数不可靠，拉回一批后本地按 updatedAt 排序）
@@ -531,17 +562,13 @@ async function analyzeChat(params) {
                     var wt = tsToMs(messages[wmi].timestamp);
                     if (wt > wmMax) wmMax = wt;
                 }
-                var wtr = {};
-                try {
-                    var wtrRaw = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
-                    if (wtrRaw && wtrRaw.content) wtr = JSON.parse(wtrRaw.content) || {};
-                } catch (e) {}
+                var wtr = await readTriggerJson() || {};
                 if (!wtr.watermarks) wtr.watermarks = {};
                 if (wmMax > 0) wtr.watermarks[chatId] = wmMax;
                 wtr.lastAnalyzedAt = new Date().toISOString();
                 wtr.lastAnalyzedChatId = chatId;
                 try {
-                    await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(wtr, null, 2), false, 'android');
+                    await writeTriggerAtomic(wtr);
                 } catch (e) {}
             } catch (e) {}
         }
@@ -552,6 +579,34 @@ async function analyzeChat(params) {
 }
 exports.analyze_chat = analyzeChat;
 
+// ===== v2.3.1：trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
+async function writeTriggerAtomic(obj) {
+    var p = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
+    var tmp = p + '.tmp';
+    try {
+        await Tools.Files.write(tmp, JSON.stringify(obj, null, 2), false, 'android');
+        await Tools.Files.move(tmp, p);
+    } catch (e) {
+        await Tools.Files.write(p, JSON.stringify(obj, null, 2), false, 'android');
+    }
+}
+// 读 trigger.json：parse 失败重试 3 次（间隔 150ms），防并发半写
+async function readTriggerJson() {
+    var p = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
+    for (var i = 0; i < 3; i++) {
+        try {
+            var raw = await Tools.Files.read(p);
+            if (raw && raw.content) {
+                var parsed = JSON.parse(raw.content);
+                if (parsed && typeof parsed === 'object') return parsed;
+            } else {
+                return null;
+            }
+        } catch (e) {}
+        await new Promise(function (res) { setTimeout(res, 150); });
+    }
+    return null;
+}
 // ===== 时间戳健壮化：兼容 epoch 毫秒 / 秒 / ISO / 本地串 =====
 function tsToMs(v) {
     if (v === undefined || v === null || v === '') return 0;
@@ -575,15 +630,11 @@ function tsToMs(v) {
 //   2) getMessages desc+200（取最近窗口）→ 过滤空消息 → 按水位线过滤新消息
 //   3) 无新消息：返回 { skipped:true, reason:'no_new_content' }，不阻塞
 //   4) 有新消息：后台异步调 analyzeChat（fire-and-forget），立即返回 { started:true, newMessageCount:N }
-//   5) 分析完成后：推进水位线 + 写 MEMORY_SYSTEM_TRIGGER_RESULT env 通知前端轮询刷新
+//   5) 分析完成后：推进水位线 + 写 trigger_result.json 文件通知前端轮询刷新（工具脚本无 setEnv，env 通道不可用）
 async function triggerAnalysis(params) {
     try {
         var chatId = (params && params.chat_id) || '';
-        var tr = {};
-        try {
-            var trRaw = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
-            if (trRaw && trRaw.content) tr = JSON.parse(trRaw.content) || {};
-        } catch (e) {}
+        var tr = await readTriggerJson() || {};
         if (!chatId && tr.chatId) chatId = String(tr.chatId);
         if (!chatId) {
             try {
@@ -621,7 +672,7 @@ async function triggerAnalysis(params) {
             tr.lastCheckedAt = new Date().toISOString();
             tr.lastCheckedChatId = chatId;
             try {
-                await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(tr, null, 2), false, 'android');
+                await writeTriggerAtomic(tr);
             } catch (e) {}
             return finish({
                 success: true,
@@ -634,6 +685,16 @@ async function triggerAnalysis(params) {
         }
         // 有新消息：后台异步分析，立即返回不阻塞 UI
         var count = newMessages.length;
+        // v2.3.2b：启动分析前先写"进行中"标记（无 finishedAt），
+        // 防止 UI 轮询 get_trigger_result 读到上一次的失败/旧结果而误显示（如"未找到可用 python3"）。
+        try {
+            await writeTriggerResultFile({
+                status: 'analyzing',
+                startedAt: new Date().toISOString(),
+                chatId: chatId,
+                newMessageCount: count
+            });
+        } catch (e) {}
         var callerCardId = (params && params.character_id) || tr.callerCardId || '';
         var personaName = tr.personaName || '';
         (async function () {
@@ -646,11 +707,7 @@ async function triggerAnalysis(params) {
                     var t = tsToMs(allMessages[mi].timestamp);
                     if (t > maxTs) maxTs = t;
                 }
-                var tr2 = {};
-                try {
-                    var trRaw2 = await Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/trigger.json');
-                    if (trRaw2 && trRaw2.content) tr2 = JSON.parse(trRaw2.content) || {};
-                } catch (e) {}
+                var tr2 = await readTriggerJson() || {};
                 if (!tr2.watermarks) tr2.watermarks = {};
                 if (maxTs > 0) tr2.watermarks[chatId] = maxTs;
                 tr2.lastAnalyzedAt = new Date().toISOString();
@@ -658,28 +715,28 @@ async function triggerAnalysis(params) {
                 tr2.lastAnalyzedNewCount = count;
                 tr2.lastResult = rOk ? 'has_data' : 'failed';
                 try {
-                    await Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/trigger.json', JSON.stringify(tr2, null, 2), false, 'android');
+                    await writeTriggerAtomic(tr2);
                 } catch (e) {}
                 try {
-                    setEnv('MEMORY_SYSTEM_TRIGGER_RESULT', JSON.stringify({
+                    await writeTriggerResultFile({
                         finishedAt: new Date().toISOString(),
                         chatId: chatId,
                         newMessageCount: count,
                         success: rOk,
                         hasData: rOk,
                         error: rOk ? '' : ((r && (r.message || (r.data && r.data.message))) || '未知错误')
-                    }));
+                    });
                 } catch (e) {}
             } catch (e) {
                 try {
-                    setEnv('MEMORY_SYSTEM_TRIGGER_RESULT', JSON.stringify({
+                    await writeTriggerResultFile({
                         finishedAt: new Date().toISOString(),
                         chatId: chatId,
                         newMessageCount: count,
                         success: false,
                         hasData: false,
                         error: (e.message || String(e))
-                    }));
+                    });
                 } catch (e2) {}
             }
         })();
@@ -700,7 +757,7 @@ async function diagEngine(params) {
         // 0) 探测 hiddenExec 环境（python 可用性、proot 环境）
         try {
             var pyCheck = await withTimeout(
-                hiddenExecSafe("command -v python3; echo '---'; python3 --version 2>&1; echo '---'; command -v python3.12; echo '---'; ls /root/.venv/bin/python3.12 2>&1; echo '---'; echo 'whoami='$(whoami)", 8000),
+                hiddenExecSafe("command -v python3; echo '---'; python3 --version 2>&1; echo '---'; command -v python3.12; echo '---'; ls /root/character_memory_engine/.venv/bin/python3.12 2>&1; echo '---'; echo 'whoami='$(whoami)", 8000),
                 10000, '环境探测超时。'
             );
             out.env.py = String(pyCheck && (pyCheck.stdout || pyCheck.output || pyCheck) || '').trim();

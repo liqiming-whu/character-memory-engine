@@ -1,5 +1,48 @@
 # Character Memory Engine 开发计划
 
+## v2.3.2 战役：ANR 闪退修复（32s 探测阻塞）+ 项目 venv 改造（2026-08-08 晚）
+
+### 背景与现象
+用户实机两次卡住 + Operit 闪退。日志证据（`logs/dbg_call.log` 2026-08-08 18:37:44）：
+- `load_life_data ms=32218` / `save_ui_state ms=32271` / `list_memories ms=32128` —— 三个调用各卡 **32s** 后失败
+- 失败消息：`未找到可用的 python3`——但 `/root/.venv/bin/python3.12` 实测存在且可执行（超时误报）
+
+### 根因链（三层，全部实锤）
+1. **worker 生命周期绑定 proot 实例**：proot 由 Operit 平台管理（`/proc` 实测 4 个 proot 实例并存），terminal 会话/proot 被回收时 worker 连带被杀（setsid 无效，proot 整树 kill）。18:40:33 拉起 → 18:41:48 再死。
+2. **detectPython 用 hiddenExec 探测，proot 未就绪/会话失效时每次卡 8s**：`execSh` → `hiddenExecSafe`（6s 超时+失败漂移 key 重试 6s），4 候选 ≈ 32-48s 同步阻塞（timing 实锤 32128~32271ms）。
+3. **32s 同步阻塞堵平台回调队列 → UI 卡死 → ANR → 闪退**（违反"任何工具调用在 worker 离线时都不能同步等待"铁律）。
+
+### 修复（v2.3.2）
+1. **detectPython 毫秒级快速失败**（main.js + packages/memory_engine.js）：改用 `Tools.Files.exists(path, 'linux')` 判存在（官方 API 支持 linux 环境，见 types/files.d.ts），**彻底移除 hiddenExec 探测**。候选：项目 venv → 旧全局 venv → 系统 python3。
+2. **项目 venv（用户要求）**：依赖只装进 `worker 运行目录/.venv`（`/root/character_memory_engine/.venv`），不再写入系统 python。
+   - worker.py 新增 `VENV_DIR`/`VENV_PY` 常量（基于 `_SCRIPT_DIR`）
+   - `deploy_install` 重写：`python3 -m venv` 创建 → venv 解释器 probe 缺失 → venv 的 pip 安装（无 `--break-system-packages`）→ venv 内二次确认 → 提示重启 Worker 生效
+   - `deploy_status` venv 检查优先报告项目 venv
+   - 所有错误消息/README 的手动启动命令更新为项目 venv 路径
+3. **验证结果**：
+   - `node --check` main.js / memory_engine.js PASS；`py_compile worker.py` PASS
+   - `deploy_install` 实机 PASS：48s 创建 venv + 安装 onnxruntime/sqlite_vec/tokenizers，import 验证 OK
+   - 项目 venv 重启 worker PASS：`vec_available: true`，deploy_status 报告 `/root/character_memory_engine/.venv`
+
+### 遗留 / 待做
+- ⏳ 烧录 + 重启 Operit 后的真机回归（快速失败路径验证：kill worker → 调用应毫秒级失败，不再 32s）
+- ⏳ 任务②剩余项：worker 离线快速失败（所有工具入口 ping 失败即返回）、triggerAnalysis 就绪检查、analyzeChat 失败推进水位线
+- 旧全局 venv `/root/.venv` 保留作兼容回退，不主动删除
+
+### 追加战役：自动分析结果"切 tab 才显示"根治（19:48 真机生效 ✅）
+
+- **现象**：自动分析完成/进行中文案与数据不刷新，需切 tab（用户交互）才显示；手动分析正常
+- **源码级根因链**（Operit 官方源码 `/tmp/operit-src` 逆向）：
+  1. compose_dsl UI 树只在 ①初始渲染 ②action 分发 ③文本输入 ④平台侧 rerender 时重建；**异步 setState（setTimeout/Promise 回调）只写 stateStore，不触发重绘**（JsComposeDslBridge.kt `notifyStateChanged` → 无订阅者即丢弃）
+  2. `__operit_rerender_compose_dsl` 是**平台 Kotlin 调 JS** 的入口，UI 脚本直接调用只返回字符串、平台不消费（JsEngine.kt `rerenderComposeDslTree`）
+  3. UI 脚本自调 `__operit_dispatch_compose_dsl_action`：`sendIntermediateResult` 是**平台调用时注入的回调**，自调时 undefined → 中间渲染结果无法送达平台（RuntimeScript 182 行实证）
+  4. **正解**：根节点 `onLoad` 本身是 action 分发，期间订阅 stateChange——**把 onLoad 窗口从 600ms 延长到 120s**（覆盖自动分析周期），期间任何 setState（含 setTimeout 链）都触发中间渲染推送平台重绘
+- **修复**（screen.js）：`onLoad` 的 `await setTimeout 600ms` → `120000ms`；`_operitRerender` 保留 renderTick 仅作窗口外兜底；清理 dispatch/隐藏节点实验代码
+- **验证**：19:48 真机 PASS——自动分析"正在分析"文案、完成文案、数据列表全部无需切 tab 自动显示
+- **坑记录**：① renderTickState hack（setState 不同值）在纯异步路径无效（无订阅者）；② `__operit_rerender_compose_dsl()` UI 脚本直接调用无效（平台不消费）；③ dispatch 自调无效（sendIntermediateResult 未注入）；④ bundle.actionStore 不对外暴露（无法定位 actionId，只能从 createNode 返回值 props.onClick.__actionId 捕获——最终也未采用）；⑤ **onLoad 长窗口是最简正解**
+
+---
+
 ## 0. 文档路由（主入口，2026-08-08 确立）
 | 文档 | 用途 | 位置 |
 |---|---|---|

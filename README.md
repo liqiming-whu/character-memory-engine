@@ -49,9 +49,10 @@ logs/            engine.log（worker 侧日志）/ dbg_call.log（subpackage 探
 ```
 Worker 启动：
 ```
-nohup /root/.venv/bin/python3.12 /sdcard/Download/Operit/character_memory_engine/worker.py \
-  --port 8765 --db /sdcard/Download/Operit/character_memory_engine/engine.db &
+nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_engine/worker.py \
+  --port 8765 --db /root/character_memory_engine/engine.db &
 ```
+> v2.3.2 起依赖只装进**项目 venv**（`/root/character_memory_engine/.venv`，由「安装依赖」按钮经 `python3 -m venv` 创建），不再写入系统 python。
 
 ### 已知限制与运维
 - **自动拉起 Worker（v2.0.20+）**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 30s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。

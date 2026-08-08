@@ -189,23 +189,12 @@ async function httpCall(action, payload) {
   }
 }
 
-// 探测可用 python3：优先 proot venv（完整向量），备选系统 python3。
-// 用 ls 判断路径存在（比 test -x 更少依赖 shell 行为差异）
+// v2.3.2b：detectPython 不再做任何 JS 侧文件探测——
+// ① hiddenExec 探测会卡 8s×N（32s 阻塞 → ANR/闪退，2026-08-08 实锤）；
+// ② Tools.Files.exists(...,'linux') 在当前 Operit 版本不可靠（实测返回空对象，误报 python3 不存在）。
+// python 路径由 deploy_install 固定创建（项目 venv），存在性校验下沉到启动脚本 bash [ -x ]（毫秒级）。
 async function detectPython() {
-  var candidates = [
-    '/root/.venv/bin/python3.12',
-    '/root/.venv/bin/python3',
-    '/usr/bin/python3',
-    'python3'
-  ];
-  for (var i = 0; i < candidates.length; i++) {
-    try {
-      // 显式标记输出：ls 的 stderr（含路径名）会被 grabOut 兜回导致误判，只认 PY_OK
-      var r = await execTerminal("if [ -x " + candidates[i] + " ]; then echo PY_OK; else echo PY_NO; fi", 8000);
-      if (String(r).indexOf('PY_OK') >= 0) return candidates[i];
-    } catch (e) {}
-  }
-  return '';
+  return ROOT_DIR + '/.venv/bin/python3.12';
 }
 
 // 部署 worker.py / embed.py / models 到 DATA_DIR（readResource 签名 (key, outputFileName, internal)）
@@ -241,6 +230,17 @@ async function deployWorkerToData() {
 // setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
 async function ensureWorkerUp() {
   var ROOT_DIR = '/root/character_memory_engine';
+  // v2.3.2b：冷启动/坏会话窗口保护——hiddenExec 失败后 30s 内快速失败，绝不碰 hiddenExec
+  // （Operit 重启早期 proot 未就绪时调用 hiddenExec 会创建坏会话 → 后续拉起永久卡，2026-08-08 实锤）
+  var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
+  try {
+    var bf = Tools.Files.read(BLOCK_FILE);
+    var bfText = (bf && (bf.content || bf.text)) || '';
+    var bfTs = parseInt(bfText, 10) || 0;
+    if (bfTs > Date.now()) {
+      return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
+    }
+  } catch (e) {}
   // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
   var LOCK = DATA_DIR + '/logs/launching.lock';
   try {
@@ -259,7 +259,7 @@ async function ensureWorkerUp() {
   try { await deployWorkerToData(); } catch (e) {}
   var pyCmd = await detectPython();
   if (!pyCmd) {
-    return { success: false, message: '未找到可用 python3，请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    return { success: false, message: '未找到可用 python3，请手动启动：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
   // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
   // db 策略：权威在 /root（worker 首次运行自动生成）；数据目录是热备副本（sync_db 写回）
@@ -273,7 +273,7 @@ async function ensureWorkerUp() {
     "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
     "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
     "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "setsid " + pyCmd + " " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
+    "PY=" + pyCmd + "; [ -x \"$PY\" ] || PY=/root/.venv/bin/python3.12; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || { echo NO_PYTHON; exit 1; }; setsid \"$PY\" " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
   ].join('; ');
   try {
     if (Tools.System && Tools.System.terminal && typeof Tools.System.terminal.hiddenExec === 'function') {
@@ -281,13 +281,22 @@ async function ensureWorkerUp() {
       await hiddenExecSafe(script, 30000);
     }
   } catch (e) {
+    try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e2) {}
     return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) };
   }
-  await new Promise(function (r) { setTimeout(r, 3000); });
-  var ping2 = await httpCall('ping_worker', {});
+  // v2.3.2b：拉起后轮询 ping（每 2s，最长 15s）替代固定 3s 等待——
+  // worker 启动需 7-8s（proot 2s + onnx 模型加载 5s），固定 3s 必然误报"拉起后未响应"（2026-08-08 实锤）
+  var ping2 = null;
+  var _pollDeadline = Date.now() + 15000;
+  while (Date.now() < _pollDeadline) {
+    await new Promise(function (r) { setTimeout(r, 2000); });
+    ping2 = await httpCall('ping_worker', {});
+    if (ping2 && ping2.success) break;
+  }
   try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
   if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid /root/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+  try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）

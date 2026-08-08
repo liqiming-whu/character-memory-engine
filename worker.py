@@ -72,6 +72,14 @@ if not MODEL_DIR or not os.path.exists(MODEL_DIR):
 # 向量去重阈值（方案 A）：余弦 ≥ 0.9 判重复
 VEC_DEDUP_THRESHOLD = 0.9
 
+# 项目 venv（v2.3.2）：依赖只装进 worker 脚本所在目录下的 .venv（正式运行于
+# /root/character_memory_engine），绝不写入系统 python（不使用 --break-system-packages）。
+# 创建方式：python3 -m venv（系统 python 仅用于创建 venv，不安装任何包）。
+VENV_DIR = os.path.join(_SCRIPT_DIR, ".venv")
+VENV_PY = os.path.join(VENV_DIR, "bin", "python3.12")
+if not os.path.exists(VENV_PY):
+    VENV_PY = os.path.join(VENV_DIR, "bin", "python3")
+
 # ===== 分类定义 =====
 LIFE_CATEGORIES = ["events", "todos", "contacts", "info", "finance", "menstrual"]
 ROLE_CATEGORIES = ["character", "relationship", "preference", "interaction_rule"]
@@ -1027,9 +1035,13 @@ def deploy_status(conn, params):
     """检查部署状态：进程/重复/依赖/模型/venv/db/端口。"""
     import importlib.metadata as md
     status = {}
-    # venv
-    status["venv_ok"] = sys.prefix != sys.base_prefix
-    status["venv_path"] = sys.prefix
+    # venv：项目 venv 优先（v2.3.2 起依赖只装 .venv），其次报告当前解释器
+    if os.path.exists(VENV_PY):
+        status["venv_ok"] = True
+        status["venv_path"] = VENV_DIR
+    else:
+        status["venv_ok"] = sys.prefix != sys.base_prefix
+        status["venv_path"] = sys.prefix
     # 进程
     count, pids = _find_worker_processes()
     status["worker_running"] = count > 0
@@ -1059,22 +1071,49 @@ def deploy_status(conn, params):
 
 
 def deploy_install(conn, params):
-    """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）。
+    """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）到项目 venv。
 
-    - 当前 python 若是 3.12（Termux TUR 或 proot venv），pip 可直接装。
-    - onnxruntime 仅完整支持 Python 3.12；Termux 默认 python 太新（3.13/3.14）装不上，
-      需先装 TUR 的 python3.12：pkg install python3.12（termux-user-repository 源）。
+    v2.3.2 起：依赖只装进 worker 运行目录下的 .venv（python3 -m venv 创建），
+    不再写入系统 python（不使用 --break-system-packages）；系统 python 仅用于
+    创建 venv 本身。安装完成后若当前 worker 仍跑在旧解释器，需重启 Worker 生效。
     """
     import subprocess
+
+    venv_dir = VENV_DIR
+    venv_py = VENV_PY
+    base_py = params.get("python") or "/usr/bin/python3"
+    if not os.path.exists(base_py):
+        base_py = "python3"
+
+    # 1) 确保项目 venv 存在（缺失则 python3 -m venv 创建）
+    if not os.path.exists(venv_py):
+        r = subprocess.run([base_py, "-m", "venv", venv_dir], capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            return {"success": False, "message": "创建 venv 失败: " + (r.stderr or r.stdout or "")[-500:]}
+        venv_py = os.path.join(venv_dir, "bin", "python3.12")
+        if not os.path.exists(venv_py):
+            venv_py = os.path.join(venv_dir, "bin", "python3")
+        if not os.path.exists(venv_py):
+            return {"success": False, "message": "venv 创建后仍找不到解释器: " + venv_dir}
+
+    # 2) 用 venv 解释器检查缺失依赖
+    probe_code = (
+        "import importlib.util,sys;"
+        "mods=['onnxruntime','sqlite_vec','tokenizers'];"
+        "print(' '.join(m for m in mods if importlib.util.find_spec(m) is None))"
+    )
     missing = []
-    if not _check_module("onnxruntime"):
-        missing.append("onnxruntime")
-    if not _check_module("sqlite_vec"):
-        missing.append("sqlite-vec")
-    if not _check_module("tokenizers"):
-        missing.append("tokenizers")
+    try:
+        r = subprocess.run([venv_py, "-c", probe_code], capture_output=True, text=True, timeout=60)
+        if r.returncode == 0 and r.stdout.strip():
+            missing = r.stdout.strip().split()
+        elif r.returncode != 0:
+            missing = ["onnxruntime", "sqlite-vec", "tokenizers"]
+    except Exception:
+        missing = ["onnxruntime", "sqlite-vec", "tokenizers"]
+
     if not missing:
-        return {"success": True, "installed": [], "message": "依赖已齐全"}
+        return {"success": True, "installed": [], "message": "依赖已齐全（项目 venv: %s）" % venv_dir}
 
     py_major_minor = "%d.%d" % sys.version_info[:2]
     setup_hint = ""
@@ -1083,19 +1122,24 @@ def deploy_install(conn, params):
             "\n\n当前 Python 是 %s，onnxruntime 仅完整支持 3.12。"
             "若在 Termux，请先安装 python3.12（termux-user-repository 源）：\n"
             "  pkg install python3.12\n"
-            "然后用 python3.12 -m pip 重试，或用 proot venv（/root/.venv/bin/python3.12）。" % py_major_minor
+            "然后重试（会用 %s 创建项目 venv）。" % (py_major_minor, base_py)
         )
 
-    cmd = [sys.executable, "-m", "pip", "install", "--break-system-packages", "--upgrade"] + missing
+    # 3) 经 venv 的 pip 安装（venv 内无需 --break-system-packages，不写系统 python）
+    cmd = [venv_py, "-m", "pip", "install", "--upgrade"] + missing
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
         if r.returncode != 0:
             return {"success": False, "message": "安装失败: " + (r.stderr or r.stdout or "")[-500:] + setup_hint}
         # 二次确认实际装成功
-        still_missing = [m for m in missing if not _check_module(m.replace("-", "_"))]
+        try:
+            r2 = subprocess.run([venv_py, "-c", probe_code], capture_output=True, text=True, timeout=60)
+            still_missing = r2.stdout.strip().split() if r2.returncode == 0 else missing
+        except Exception:
+            still_missing = missing
         if still_missing:
             return {"success": False, "message": "部分依赖仍未安装: " + ", ".join(still_missing) + setup_hint}
-        return {"success": True, "installed": missing, "message": "已安装: " + ", ".join(missing)}
+        return {"success": True, "installed": missing, "message": "已安装到项目 venv（%s）: %s；请重启 Worker 生效。" % (venv_dir, ", ".join(missing))}
     except Exception as e:
         return {"success": False, "message": "安装失败: " + str(e) + setup_hint}
 
