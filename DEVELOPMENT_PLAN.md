@@ -363,7 +363,15 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   - 修复方向补充：**工具层加 Ubuntu 就绪保护**——首次 hiddenExec 探测失败不立即抛错、也不硬等，进入后台延迟重试队列（30s/60s）；UI 侧先显示"worker 初始化中"，就绪后自动拉起
 - **沙盒实验记录（2026-08-08）**：diag_engine 在进程 D 的 hiddenExec 环境探测返回 `env.py`: `/usr/bin/python3 | Python 3.12.3 | /usr/bin/python3.12 | /root/.venv/bin/python3.12 | whoami=root`——**沙盒 hiddenExec 能正常探测到全部 python3 路径**；此前"未找到可用的 python3"全部为超时误报
 - **划掉/退出 app 连带杀死 worker（2026-08-08 实验实锤）**：worker 进程跑在 proot 内、proot 是 Operit 的子进程（PPID=Operit）——**退出/划掉 app → Operit 被杀 → proot 连带被杀 → worker 必死**。此前“没有 kill worker、worker 应该还活着”的假设是错觉：只要 app 重启过，worker 一定需要重新拉起，**不存在 worker 存活跨 app 重启的状态**
-- **UI 初始化 await trigger_analysis 的转圈观察（2026-08-08 两次对比实验）**：screen.js 初始化 `await ctx.callTool('trigger_analysis')` 会阻塞 UI 渲染。第一次（kill worker 后划掉重进）：Operit 启动 4s 后 [init] 返回 → UI 先渲染、loadData 失败自动重试（300ms 递增）→ 重试时把 worker 拉起（约 6s 后数据到位）→ 用户感知“几乎没转圈”；第二次（退出重进，worker 同样已死）：Operit 启动 8s 后 [init] 才返回（冷启动早期平台调用波动 + 后台 analyzeChat 的 ensureWorkerUp 与 UI 初始化并发竞争）→ 用户感知“转圈”。**结论：转圈 = UI 初始化被 trigger_analysis/平台调用/worker 拉起卡住，与是否手动 kill worker 无关**；印证修复项 2/3 的方向（工具调用快速失败、UI 不等 worker）
+- **UI 转圈机制最终实锤（2026-08-08 七轮对照实验，替代早前“两次对比实验”记录）**：
+  - 表象：screen.js 初始化 `await ctx.callTool('trigger_analysis')` 阻塞 UI 渲染；秒进时 [init] 2-4s 返回，转圈时 [init] 8s 返回
+  - **根因 = save_ui_state（Operit 平台在 UI 挂载时自动调用）与 trigger_analysis（UI JS init 调用）的并发时序竞争**：
+    - 并行（碰巧同时发起）：save_ui_state 在 worker 离线时同步等拉起（约 5s）→ 堵住平台回调队列 → trigger_analysis 结果（早已完成）排队延迟回传 → [init] 延迟 → 转圈
+    - 串行（trigger_analysis 先回传）：[init] 2-3s 返回 → UI 先渲染 → save_ui_state 的 5s 等待后台化 → 秒进
+  - **与是否 kill worker 无关**：不 kill 5 次 = 秒进 2 / 转圈 3（约 50/50 随机）；kill 2 次全秒进但样本小，疑似巧合。worker 拉起耗时固定 ~7s（proot 2s 就绪 + 探测 + 启动/onnx 模型加载 5s），与死法无关
+  - 七轮数据：秒进 [init]=3s/4s/2s/2s，转圈 [init]=8s/8s/8s；save_ui_state 每次 4948-5183ms（同步等 worker），worker listening 每次约 7s
+  - 结论：**任何工具调用在 worker 离线时都不能同步等待**（治本），无论 save_ui_state 与 trigger_analysis 如何并发，平台回调队列都不被堵 → 转圈从根上消失；印证修复项 2/3 方向
+- **ensureWorkerUp 拉起后等待窗口不足（2026-08-08 实锤）**：拉起脚本后仅 `sleep 3s` 就 ping2，但 worker 启动需 4-5s（onnx 模型加载 + GPU 探测）→ 三次实测（10:33:14/10:36:33/10:37:54）均出现 listening 与“拉起后 worker 仍未响应”同秒误报；实际 worker 稍后就绪，靠下次调用 alreadyUp 兜底——**修复：拉起后轮询 ping（每 2s，最长 10-15s）替代固定 3s 等待**
 - **LLM 不返回标准 JSON 实锤（2026-08-08）**：10:12:08 `analyze_chat ms=13138ms ok=False msg=AI 提取失败或返回格式错误`——后台分析 13s 后因 LLM 返回格式异常失败。**验证了 ChatGPT 计划文档（docs/CME_高级记忆能力优化计划.md 2.2 小节）的预判“输出可能不完整或 JSON 结构异常”**；分析链路需要 JSON 解析容错（修复/重试），并配合修复项 4（保存失败也推进水位线，避免全量重分析死循环）
 - 附加记录：**CME 日志时间戳体系（2026-08-08 最终态）**——worker.py 已改 `time.gmtime(time.time()+8*3600)` **固定北京时间输出（不依赖 proot/TZ）**；CME JS 日志（jsLog/dbgUi/dbgLog）`_localTs()/_localMd()` 跟随系统时区（进程缓存）；**operit.log 跟随系统时区（Java 进程启动时缓存默认时区，重启才刷新）**——2026-08-08 UTC 实验实锤：`cmd alarm set-timezone Etc/UTC` 后重启 Operit，operit.log 全程 UTC；此前"固定北京时间"为误解。**proot Ubuntu 已改回 UTC 惯例**（/etc/profile.d/tz.sh → Etc/UTC、/etc/localtime → Etc/UTC、/etc/timezone → Etc/UTC），重装/重置后无需再配；三处日志统一为北京时间
 ---
