@@ -356,7 +356,7 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   2. **worker 离线时工具调用快速失败**：`run()` 内不要同步触发 `ensureWorkerUp` 长阻塞；UI 先返回失败，拉起操作放后台（配合 1 的自动重试）
   3. **triggerAnalysis 入口加 worker 就绪检查**（最核心）：先 `ping_worker`，失败直接返回 `{skipped:true, reason:'worker_not_ready'}`，不启动 analyzeChat——避免 worker 离线时前端照样启动分析、白调 LLM
   4. **analyzeChat 保存失败时也推进水位线/标记失败**：避免"分析失败 → 水位线不动 → 下次全量重分析"死循环（与水位线任务联动）
-- 附加记录：**CME 日志时间戳体系**（2026-08-08 排查实锤）——JS 侧日志（jsLog/dbgUi/dbgLog）用 `new Date().toISOString()` **固定 UTC**，改系统时区无效；worker.py 用 `time.strftime` 跟随 proot 环境时区；operit.log 固定北京时间（疑似 Java 进程时区缓存，待 UTC 实验验证）。排查日志时注意换算，JS 日志 = UTC（北京 -8h）
+- 附加记录：**CME 日志时间戳体系**（2026-08-08 排查实锤）——JS 侧日志（jsLog/dbgUi/dbgLog）用 `new Date().toISOString()` **固定 UTC**，改系统时区无效；worker.py 用 `time.strftime` 跟随 **proot Ubuntu 环境**时区（与 Android 系统时区独立，当前 CST）；**operit.log 跟随系统时区（Java 进程启动时缓存默认时区，重启才刷新）**——2026-08-08 UTC 实验实锤：`cmd alarm set-timezone Etc/UTC` 后重启 Operit，operit.log 全程 UTC；此前"固定北京时间"为误解（切 UTC 未重启进程，时区缓存未刷新）。排查日志时注意换算，CME JS 日志 = UTC（北京 -8h）
 ---
 ## 8. 开发原则
 
