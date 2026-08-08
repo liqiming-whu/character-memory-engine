@@ -361,6 +361,9 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   - 触发链：重启后快速进入 app 点开插件（<30s）→ UI 初始化调 hiddenExec（detectPython/ensureWorkerUp）→ 竞态命中 → 探测超时/坏会话 → 后续调用永久卡
   - 进程对比实验（2026-08-08）：进程 C（09:23 重启，1 分钟内触发 hiddenExec）→ 环境探测持续超时 23 分钟未恢复；进程 D（09:46 重启，80 秒后才触发）→ diag_engine 完全正常（python3 探测全通过）
   - 修复方向补充：**工具层加 Ubuntu 就绪保护**——首次 hiddenExec 探测失败不立即抛错、也不硬等，进入后台延迟重试队列（30s/60s）；UI 侧先显示"worker 初始化中"，就绪后自动拉起
+  - **proot 重建速度实测（2026-08-08 六次）**：Operit 启动 → proot 进程创建稳定 **2 秒**（10:09:03→05 / 10:11:46→48 / 10:22:33→35 / 10:25:19→21 / 10:33:07→09 / 10:37:47→49）；worker 全链路拉起（探测→启动→模型加载→listening）固定 **7-8 秒**。热重建窗口极短，正常使用场景几乎不构成竞态
+  - **待验证假设（pending，需受控长放置实验实锤）**：长时间不启动（如睡一觉、proot 完全终止 + 缓存冷）后冷启动快速点开插件可能命中竞态——今早 08:58 ANR 与进程 C/D 对比为自然样本（强支持），但缺少一次"人为放置 → 冷启动 → 快速点开"的受控验证
+  - **用户使用经验（2026-08-08）**：① 实验难做（无法保证每次点开速度够快），但**一般第二次退出重进即可恢复**，不算大问题；② 实用规避：**使用时不秒进插件，等待约 10 秒再点开**（proot 2s 就绪 + worker 7-8s 拉起，10s 是保守余量）即可避开竞态窗口
 - **沙盒实验记录（2026-08-08）**：diag_engine 在进程 D 的 hiddenExec 环境探测返回 `env.py`: `/usr/bin/python3 | Python 3.12.3 | /usr/bin/python3.12 | /root/.venv/bin/python3.12 | whoami=root`——**沙盒 hiddenExec 能正常探测到全部 python3 路径**；此前"未找到可用的 python3"全部为超时误报
 - **划掉/退出 app 连带杀死 worker（2026-08-08 实验实锤）**：worker 进程跑在 proot 内、proot 是 Operit 的子进程（PPID=Operit）——**退出/划掉 app → Operit 被杀 → proot 连带被杀 → worker 必死**。此前“没有 kill worker、worker 应该还活着”的假设是错觉：只要 app 重启过，worker 一定需要重新拉起，**不存在 worker 存活跨 app 重启的状态**
 - **UI 转圈机制最终实锤（2026-08-08 七轮对照实验，替代早前“两次对比实验”记录）**：
