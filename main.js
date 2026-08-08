@@ -21,10 +21,16 @@ var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
 // 写日志：追加到 engine.log（Tools.Files.write 支持 append=true）
+// v2.3.1：时间戳跟随系统本地时区（原 toISOString 固定 UTC，排查需换算）
+function _localTs() {
+  var d = new Date();
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 function jsLog(level, msg) {
   try {
     var logPath = '/sdcard/Download/Operit/character_memory_engine/logs/engine.log';
-    var line = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' ' + String(level).toUpperCase().padEnd(5) + ' [js] ' + msg + '\n';
+    var line = _localTs() + ' ' + String(level).toUpperCase().padEnd(5) + ' [js] ' + msg + '\n';
     try {
       Tools.Files.write(logPath, line, true, 'android');
     } catch (e) {

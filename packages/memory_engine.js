@@ -135,9 +135,14 @@ var ROOT_DIR = '/root/character_memory_engine';
 
 // ===== 调试探针（临时）：记录每次工具调用的返回，用于定位 UI "未知错误" =====
 var DBG_LOG = '/sdcard/Download/Operit/character_memory_engine/logs/dbg_call.log';
+function _localTs() {
+  var d = new Date();
+  function p(n) { return (n < 10 ? '0' : '') + n; }
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
 function dbgLog(action, obj) {
   try {
-    var line = new Date().toISOString().replace('T', ' ').slice(0, 19) + ' [' + action + '] ' + JSON.stringify(obj).slice(0, 600) + '\n';
+    var line = _localTs() + ' [' + action + '] ' + JSON.stringify(obj).slice(0, 600) + '\n';
     try { Tools.Files.write(DBG_LOG, line, true, 'android'); }
     catch (e) {
       try {
