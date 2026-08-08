@@ -304,6 +304,11 @@ terminal.hiddenExec + worker + SQLite + JSON payload
 ---
 
 ## 待办（低优先级，不占阶段号）
+### env 缓存问题（低优，2026-08-08 排查 API 配置来源时发现）
+- 现象：`env_preferences.xml`（/data/user/0/com.ai.assistance.operit/shared_prefs/）已达 92KB+——CME 把 `CACHED_MEMORIES`/`CACHED_PERSONA`/`CACHED_CHAR_MEMORIES`/`MEMORY_ENGINE_UI_STATE`/`MEMORY_SYSTEM_UI_STATE` 等大 JSON 缓存直接 setEnv 到 Operit 平台 env
+- 影响：功能正常（env 是 Operit 平台持久化，卸载插件不清除，跨重启可用），但大值 env 每次读写序列化整个 XML，性能一般；且与 `MEMORY_SYSTEM_*` 配置混存，文件持续膨胀
+- 优化方向（待评估）：缓存类数据改为落文件（DATA_DIR 下 json）或独立存储；env 只留配置与轻量状态
+- 附带实锤（同一轮）：CME/CMS 的 API 配置（MEMORY_SYSTEM_ENDPOINT/KEY/MODEL）就存在该 env 文件里，两插件共用同一套键；卸载重装插件不清 env，故配置"不需要重新设置"
 
 ### 转圈优化（Skeleton 轻量版，P3，2026-08-07 评估入档）
 
