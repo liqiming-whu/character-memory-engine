@@ -87,7 +87,8 @@ LOG_PATH = os.environ.get("MEMORY_ENGINE_LOG", os.path.join(DATA_DIR, "logs", "e
 
 def log(level, msg):
     """写日志文件（线程安全、纯追加，保留全部历史），同时写 stderr 保留 /tmp 次要捕获。"""
-    line = "%s %-5s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), str(level).upper(), msg)
+    # 固定北京时间（UTC+8）输出：不依赖 proot 时区/TZ，与 JS 日志、operit.log 统一（均为北京时间）
+    line = "%s %-5s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 8 * 3600)), str(level).upper(), msg)
     try:
         with _LOG_LOCK:
             os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
