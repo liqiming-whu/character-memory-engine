@@ -356,7 +356,13 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   2. **worker 离线时工具调用快速失败**：`run()` 内不要同步触发 `ensureWorkerUp` 长阻塞；UI 先返回失败，拉起操作放后台（配合 1 的自动重试）
   3. **triggerAnalysis 入口加 worker 就绪检查**（最核心）：先 `ping_worker`，失败直接返回 `{skipped:true, reason:'worker_not_ready'}`，不启动 analyzeChat——避免 worker 离线时前端照样启动分析、白调 LLM
   4. **analyzeChat 保存失败时也推进水位线/标记失败**：避免"分析失败 → 水位线不动 → 下次全量重分析"死循环（与水位线任务联动）
-- 附加记录：**CME 日志时间戳体系**（2026-08-08 排查实锤）——JS 侧日志（jsLog/dbgUi/dbgLog）用 `new Date().toISOString()` **固定 UTC**，改系统时区无效；worker.py 用 `time.strftime` 跟随 **proot Ubuntu 环境**时区（与 Android 系统时区独立，当前 CST）；**operit.log 跟随系统时区（Java 进程启动时缓存默认时区，重启才刷新）**——2026-08-08 UTC 实验实锤：`cmd alarm set-timezone Etc/UTC` 后重启 Operit，operit.log 全程 UTC；此前"固定北京时间"为误解（切 UTC 未重启进程，时区缓存未刷新）。排查日志时注意换算，CME JS 日志 = UTC（北京 -8h）
+- **竞态机制确认（2026-08-08 用户推测 + 实验验证）**：
+  - 机制：Operit 重启后 Ubuntu/proot 初始化需要约 30-80 秒；期间调用 hiddenExec 触发 executor 会话竞态（main.js onAppCreate 注释早有认知：*"Operit 重启早期（数秒内）调用 hiddenExec 有 executor 会话竞态风险，可能创建坏会话导致后续永久卡；30s 是保守兜底值"*，但**用户手动打开插件无延迟保护**）
+  - 触发链：重启后快速进入 app 点开插件（<30s）→ UI 初始化调 hiddenExec（detectPython/ensureWorkerUp）→ 竞态命中 → 探测超时/坏会话 → 后续调用永久卡
+  - 进程对比实验（2026-08-08）：进程 C（09:23 重启，1 分钟内触发 hiddenExec）→ 环境探测持续超时 23 分钟未恢复；进程 D（09:46 重启，80 秒后才触发）→ diag_engine 完全正常（python3 探测全通过）
+  - 修复方向补充：**工具层加 Ubuntu 就绪保护**——首次 hiddenExec 探测失败不立即抛错、也不硬等，进入后台延迟重试队列（30s/60s）；UI 侧先显示"worker 初始化中"，就绪后自动拉起
+- **沙盒实验记录（2026-08-08）**：diag_engine 在进程 D 的 hiddenExec 环境探测返回 `env.py`: `/usr/bin/python3 | Python 3.12.3 | /usr/bin/python3.12 | /root/.venv/bin/python3.12 | whoami=root`——**沙盒 hiddenExec 能正常探测到全部 python3 路径**；此前"未找到可用的 python3"全部为超时误报
+- 附加记录：**CME 日志时间戳体系（2026-08-08 最终态）**——worker.py 已改 `time.gmtime(time.time()+8*3600)` **固定北京时间输出（不依赖 proot/TZ）**；CME JS 日志（jsLog/dbgUi/dbgLog）`_localTs()/_localMd()` 跟随系统时区（进程缓存）；**operit.log 跟随系统时区（Java 进程启动时缓存默认时区，重启才刷新）**——2026-08-08 UTC 实验实锤：`cmd alarm set-timezone Etc/UTC` 后重启 Operit，operit.log 全程 UTC；此前"固定北京时间"为误解。**proot Ubuntu 已改回 UTC 惯例**（/etc/profile.d/tz.sh → Etc/UTC、/etc/localtime → Etc/UTC、/etc/timezone → Etc/UTC），重装/重置后无需再配；三处日志统一为北京时间
 ---
 ## 8. 开发原则
 
