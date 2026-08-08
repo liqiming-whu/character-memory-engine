@@ -349,12 +349,17 @@ loadingChatsState[1](false);
   // v2.2.4（CMS v1.8.4 迁移）：工具调用与 env 缓冲均限频 500ms——
   // 渲染风暴时从"每次渲染 1 次工具调用 + 1 次 setEnv"降到 ≤2 次/秒，
   // 消除渲染闭包内 I/O 对 Operit 全量重绘的放大作用；关键事件日志能力保留。
+  function _localMd(ms) {
+    var d = new Date(ms);
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    return p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
   function dbgUi(tag, info) {
     try {
       var now = Date.now();
       var dt = _dbgTs ? (now - _dbgTs) : 0;
       _dbgTs = now;
-      var line = new Date(now).toISOString().replace('T', ' ').slice(5, 19) +
+      var line = _localMd(now) +
         ' [' + tag + '] +' + dt + 'ms ' + (info || '') + ' r=' + dbgRenderCount + '\n';
       if (now - _dbgLastTool >= 500) {
         _dbgLastTool = now;
