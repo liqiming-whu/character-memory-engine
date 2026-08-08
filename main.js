@@ -467,9 +467,20 @@ async function onPromptFinalize(input) {
       jsLog('DEBUG', 'onPromptFinalize: 读 trigger 失败: ' + (e.message || String(e)));
     }
 
+    // v2.3.1：写前合并保留水位线等字段（旧逻辑整写会清空 watermarks/lastAnalyzedAt，导致每次重复全量分析）
+    var nextTrigger = { chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName };
+    if (trigger) {
+      if (trigger.watermarks) nextTrigger.watermarks = trigger.watermarks;
+      if (trigger.lastAnalyzedAt) nextTrigger.lastAnalyzedAt = trigger.lastAnalyzedAt;
+      if (trigger.lastAnalyzedChatId) nextTrigger.lastAnalyzedChatId = trigger.lastAnalyzedChatId;
+      if (trigger.lastAnalyzedNewCount !== undefined) nextTrigger.lastAnalyzedNewCount = trigger.lastAnalyzedNewCount;
+      if (trigger.lastResult) nextTrigger.lastResult = trigger.lastResult;
+      if (trigger.lastCheckedAt) nextTrigger.lastCheckedAt = trigger.lastCheckedAt;
+      if (trigger.lastCheckedChatId) nextTrigger.lastCheckedChatId = trigger.lastCheckedChatId;
+    }
     if (!trigger) {
       try {
-        await Tools.Files.write(TRIGGER_FILE, JSON.stringify({ chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName }, null, 2), false, 'android');
+        await Tools.Files.write(TRIGGER_FILE, JSON.stringify(nextTrigger, null, 2), false, 'android');
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 写 trigger 失败: ' + (e.message || String(e)));
       }
@@ -488,7 +499,7 @@ async function onPromptFinalize(input) {
         autoAnalyzeChat(processChatId, trigger.callerCardId || callerCardId, trigger.personaName || personaName).catch(function() {});
       }
       try {
-        await Tools.Files.write(TRIGGER_FILE, JSON.stringify({ chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName }, null, 2), false, 'android');
+        await Tools.Files.write(TRIGGER_FILE, JSON.stringify(nextTrigger, null, 2), false, 'android');
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 更新 trigger 失败: ' + (e.message || String(e)));
       }

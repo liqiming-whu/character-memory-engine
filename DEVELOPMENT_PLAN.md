@@ -340,15 +340,16 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   - 管理层：搜索升级走后端全量检索（`list_memories` query）→ 多选批量删除（SQLite 批量删，双端中优先落地）→ 容量感知与清理引导（配合备份导出）
   - 性能验证：500+/1000+ 条记忆下 UI 流畅度与内存
 - 约束：与 CMS 方案保持一致（详见 CMS DEVELOPMENT_PLAN.md 第 13 节）；落地顺序：分页 → 后端搜索 → 批量删 → 性能验证
-### 自动分析水位线丢失（**v2.3.1 优先解决**，2026-08-08 02:04 已定位根因，2026-08-08 用户确认排期）
+### 自动分析水位线丢失（**v2.3.1 ① 已修复**，2026-08-08 02:04 定位根因，16:00 实装）
 - 现象：`trigger_analysis` 启动后台分析后，UI 长时间不显示完成；每次发消息后打开插件都触发全量分析（30-40s），表现为"分析中"迟迟不回报
 - 根因（已实证）：**main.js onPromptFinalize 每次消息发送时整写 trigger.json（仅 5 字段：chatId/cooldownStart/callerCardId/personaName）**，把 trigger_analysis 写入的 `watermarks`/`lastAnalyzedAt` 清空 → 水位线周期性丢失 → 打开插件时永远全量分析
 - 佐证：engine.log 02:03:02/47/55 三次 analyze_chat 成功（32-38s 全量量级）；dbg_call.log 02:03:55 正常返回 no_new_content（当时水位线存在）；此后 trigger.json 被 onPromptFinalize 覆盖，watermarks 消失
-- 修复方向（下版本）：
-  1. **根因**：main.js 写 trigger.json 前先读旧值，合并保留 `watermarks`/`lastAnalyzedAt` 再写
-  2. 验证 `setEnv('MEMORY_SYSTEM_TRIGGER_RESULT')` 在 CME 沙盒是否可用（CME 此前无 setEnv 使用先例，已 try-catch 包裹、失败静默）；不可用则改前端轮询读 result.json 文件
-  3. 与 CMS 12.2（自动分析完成但 UI 不刷新）同源问题一并修：CMS 是分析完成但 UI 不刷新；CME 是水位线丢失导致反复全量
-- 优先级：**高（v2.3.1 首个任务，2026-08-08 用户确认）**——根因已实证、修复方向明确（写 trigger.json 前合并保留 watermarks/lastAnalyzedAt），预计随 v2.3.1 完成；CMS 12.2（分析完成但 UI 不刷新）同源问题一并处理
+- 修复（已实施，v2.3.1 ①，2026-08-08 16:00）：
+  1. main.js onPromptFinalize 写 trigger.json 前先读旧值构造 nextTrigger，**合并保留** `watermarks`/`lastAnalyzedAt`/`lastAnalyzedChatId`/`lastAnalyzedNewCount`/`lastResult`/`lastCheckedAt`/`lastCheckedChatId`；两处整写（首次写入 + 更新写入）统一改为写 nextTrigger
+  2. 验证：`node --check` 语法通过；合并逻辑断言全 PASS（旧字段保留、新 chatId/cooldownStart/personaName 生效）
+  3. 待真机验证：发消息后 trigger.json 的 watermarks 不再消失；下次打开插件为增量分析而非全量
+- 剩余项：setEnv('MEMORY_SYSTEM_TRIGGER_RESULT') 沙盒可用性仍待确认（CME 已 try-catch 包裹、失败静默）；CMS 12.2（自动分析完成但 UI 不刷新）同源问题在 CMS 侧另行处理
+- 状态：**代码已完成，真机验证待 v2.3.1 整体打包后确认**
 ### 冷启动 ANR 卡死（**v2.3.1 优先，2026-08-08 09:00 实锤**）
 - 现象：Operit 冷启动后**第一次打开 CME 卡死、app 闪退**；重启 Operit 后第二次打开 CME 完全正常
 - 证据链（2026-08-08 09:00 实测）：
