@@ -344,8 +344,20 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   2. 验证 `setEnv('MEMORY_SYSTEM_TRIGGER_RESULT')` 在 CME 沙盒是否可用（CME 此前无 setEnv 使用先例，已 try-catch 包裹、失败静默）；不可用则改前端轮询读 result.json 文件
   3. 与 CMS 12.2（自动分析完成但 UI 不刷新）同源问题一并修：CMS 是分析完成但 UI 不刷新；CME 是水位线丢失导致反复全量
 - 优先级：**高（v2.3.1 首个任务，2026-08-08 用户确认）**——根因已实证、修复方向明确（写 trigger.json 前合并保留 watermarks/lastAnalyzedAt），预计随 v2.3.1 完成；CMS 12.2（分析完成但 UI 不刷新）同源问题一并处理
+### 冷启动 ANR 卡死（**v2.3.1 优先，2026-08-08 09:00 实锤**）
+- 现象：Operit 冷启动后**第一次打开 CME 卡死、app 闪退**；重启 Operit 后第二次打开 CME 完全正常
+- 证据链（2026-08-08 09:00 实测）：
+  - `/data/anr/anr_2026-08-08-09-01-03-338` + event log：`am_anr: Input dispatching timed out`（MainActivity 等待 MotionEvent 5s 无响应）→ 09:01:05 `am_proc_died` 进程被杀；08:58:58 冷启动，09:01:09 用户重启后正常
+  - engine.log：09:00:35 `onAppCreate: worker 未就绪: 未找到可用的 python3`（冷启动早期 terminal 未就绪，detectPython 4 个候选路径各 8s 超时 = 最多 32s）
+  - dbg_call.log：09:00:43 `save_ui_state ms=32218`（32s 阻塞后报"未找到可用的 python3"）；09:00:11/09:00:43 前端 `trigger_analysis` 在 worker 离线时仍启动 analyze（chatLen=20007 白跑一次）
+- 根因链：冷启动 terminal/executor 未就绪 → `detectPython()` 硬等 32s 失败 → worker 拉不起 → **每个依赖 worker 的工具调用内部又同步触发 ensureWorkerUp → 再走 32s 阻塞** → 主线程被长阻塞工具调用拖死 → ANR 被杀
+- 修复项（2026-08-08 用户确认入档，随 v2.3.1 完成）：
+  1. **detectPython 冷启动早期快速失败 + 延迟重试**：terminal 未就绪时别硬等 32s；先快速探测一次（缩短单次超时），失败则 60s 后自动重试——worker 在后台自己起来，用户打开时即就绪
+  2. **worker 离线时工具调用快速失败**：`run()` 内不要同步触发 `ensureWorkerUp` 长阻塞；UI 先返回失败，拉起操作放后台（配合 1 的自动重试）
+  3. **triggerAnalysis 入口加 worker 就绪检查**（最核心）：先 `ping_worker`，失败直接返回 `{skipped:true, reason:'worker_not_ready'}`，不启动 analyzeChat——避免 worker 离线时前端照样启动分析、白调 LLM
+  4. **analyzeChat 保存失败时也推进水位线/标记失败**：避免"分析失败 → 水位线不动 → 下次全量重分析"死循环（与水位线任务联动）
+- 附加记录：**CME 日志时间戳体系**（2026-08-08 排查实锤）——JS 侧日志（jsLog/dbgUi/dbgLog）用 `new Date().toISOString()` **固定 UTC**，改系统时区无效；worker.py 用 `time.strftime` 跟随 proot 环境时区；operit.log 固定北京时间（疑似 Java 进程时区缓存，待 UTC 实验验证）。排查日志时注意换算，JS 日志 = UTC（北京 -8h）
 ---
-
 ## 8. 开发原则
 
 - 不依赖官方 Memory 数据库。
