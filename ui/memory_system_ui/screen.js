@@ -169,6 +169,9 @@ var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
+// v2.3.3: 渲染闭包调度时间闸——角色页/知识页每次渲染都进调度分支(ref仅防同帧)，未命中缓存路径每次触发都 callTool→setState→再渲染→再触发(渲染风暴)；120s onLoad 窗口内风暴渲染全部推送平台主线程→过载 ANR 闪退(2026-08-09 实锤)
+var characterLoadAtRef = ctx.useRef('characterLoadAt', 0);
+var memoryLoadAtRef = ctx.useRef('memoryLoadAt', 0);
 // ===== v2.3.1：全局串行调用队列（bridge 响应错配免疫，CMS 同款方案）=====
 function serialCall(toolName, params) {
   var g = (typeof globalThis !== 'undefined' ? globalThis : window);
@@ -334,8 +337,9 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
   // ===== 初始化时加载记忆 =====
   var currentTab = tabState[0];
   var memoryLoadedTs = Number(memoryLoadedState[0] || 0);
-  if ((currentTab === 3) && (!memoryLoadedTs || (Date.now() - memoryLoadedTs) > 60000) && !memoryLoadingState[0] && !memoryLoadScheduledRef.current) {
+  if ((currentTab === 3) && (!memoryLoadedTs || (Date.now() - memoryLoadedTs) > 60000) && !memoryLoadingState[0] && !memoryLoadScheduledRef.current && (Date.now() - (memoryLoadAtRef.current || 0)) > 5000) {
     memoryLoadScheduledRef.current = true;
+    memoryLoadAtRef.current = Date.now();
     setTimeout(function() {
       loadKnowledgeMemories().finally(function() { memoryLoadScheduledRef.current = false; });
     }, 0);
@@ -352,8 +356,9 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
 
   // ===== 角色页：进入时自动加载角色上下文与记忆（与知识页同款 setTimeout 模式）=====
   // 每次进入角色 tab 都重新加载，不因之前加载过而跳过；ref 仅防同帧重复。
-  if (currentTab === 4 && !characterLoadScheduledRef.current) {
+  if (currentTab === 4 && !characterLoadScheduledRef.current && (Date.now() - (characterLoadAtRef.current || 0)) > 5000) {
     characterLoadScheduledRef.current = true;
+    characterLoadAtRef.current = Date.now();
     setTimeout(function() {
       loadScreenPersona().finally(function() { characterLoadScheduledRef.current = false; });
     }, 0);

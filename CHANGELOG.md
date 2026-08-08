@@ -1,4 +1,11 @@
 # Changelog
+## v2.3.3（2026-08-09，渲染风暴时间闸修复——前端卡死闪退）
+### 修复：角色页/知识页渲染闭包调度无节流 → 渲染风暴 → ANR 闪退（app 被杀连带 worker）
+- **现象**：侧边栏打开后前端卡死闪退；重启 app 卡顿不消失（旧代码风暴每次打开必复现，代码级）；卡死瞬间无日志（JS 线程被占满写不出）
+- **证据链**（dbg_ui.log 实锤）：00:59 段 13 秒 93 次渲染（r=20→113）；01:25:44-48 五秒内 loadPersona 触发 10 次、list_memories 调用 10 次；01:26-01:27 analyze_chat 两次 52-63s（LLM 流中断 IncompleteRead）期间 loadData 延迟 40s → 主线程堆积
+- **根因**：screen.js 渲染闭包内调度分支仅靠 useRef 防同帧（currentTab===4 分支），未命中缓存路径每次渲染都触发 loadScreenPersona → setState → 再渲染 → 再触发（渲染-调度循环）；v2.3.2 的 120s onLoad 窗口把风暴渲染全部推送到平台主线程（此前 600ms 窗口大多丢弃）→ 渲染过载 + 工具调用排队 → ANR → app 被杀 → proot/worker 连带死亡
+- **修复**：角色页（tab4）/知识页（tab3）渲染闭包调度加 5s 时间闸（characterLoadAtRef/memoryLoadAtRef），ref 防重入 + 时间闸阻断循环
+- **验证**：实机角色页停留 98 秒——loadPersona 触发间隔 8s/79s/10s（全部 ≥5s 闸值），触发密度较崩溃段下降一个数量级，渲染节奏正常，卡顿消失
 ## v2.3.2（2026-08-08，ANR 闪退修复 + 项目 venv 改造）
 ### 修复：worker 离线时 32s 探测阻塞 → UI 卡死 / Operit 闪退
 - **现象**：实机两次卡住 + app 闪退；`dbg_call.log` 实测 `load_life_data ms=32218` / `save_ui_state ms=32271` / `list_memories ms=32128` 各卡 32s 后失败，误报「未找到可用的 python3」（实际 python 存在）
