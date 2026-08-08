@@ -20,6 +20,17 @@ var lastSavedCardId = '';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
+// ===== v2.3.4 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
+function cmeProbe(tag, extra) {
+  try {
+    var mono = 0;
+    try { if (typeof performance !== 'undefined' && performance.now) mono = Math.round(performance.now() * 10) / 10; } catch (e) {}
+    var line = tag + ' wall=' + new Date().toISOString() + ' mono=' + mono;
+    if (extra) line += ' ' + extra;
+    Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/logs/cold_probe.log', line + '\n', true, 'android');
+  } catch (e) {}
+}
+
 // 写日志：追加到 engine.log（Tools.Files.write 支持 append=true）
 // v2.3.1：时间戳跟随系统本地时区（原 toISOString 固定 UTC，排查需换算）
 function _localTs() {
@@ -229,9 +240,8 @@ async function deployWorkerToData() {
 // 用 venv python 运行（完整向量），db 在 /root 运行（WAL），数据目录保留部署副本（sync_db 热备）。
 // setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
 async function ensureWorkerUp() {
-  var ROOT_DIR = '/root/character_memory_engine';
-  // v2.3.2b：冷启动/坏会话窗口保护——hiddenExec 失败后 30s 内快速失败，绝不碰 hiddenExec
-  // （Operit 重启早期 proot 未就绪时调用 hiddenExec 会创建坏会话 → 后续拉起永久卡，2026-08-08 实锤）
+  // v2.4：冷启动保护窗口 + 租约单飞 + 轻提交（hiddenExec 只提交，重活在 start_worker.sh 后台执行）+ health 轮询
+  // 修复：旧版 hiddenExec 执行完整重脚本，冷启动时阻塞平台工具通道 30-35s → UI 卡死闪退（2026-08-09 实锤）
   var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
   try {
     var bf = Tools.Files.read(BLOCK_FILE);
@@ -241,62 +251,62 @@ async function ensureWorkerUp() {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
-  // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
-  var LOCK = DATA_DIR + '/logs/launching.lock';
+  // ① health 先检（httpCall 通道，快，不占 hiddenExec）
+  var ping = null;
+  try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
+  if (ping && ping.success) return { success: true, alreadyUp: true };
+  // ② 部署最新 worker.py 等（JS 层复制，不走 hiddenExec）
+  try { await deployWorkerToData(); } catch (e) {}
+  // ③ 租约软裁决（跨模块状态落盘）：有效租约 → 不重复启动，直接轮询
+  var LEASE = DATA_DIR + '/logs/launch_lease.json';
+  var launchId = 'L' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+  var now = Date.now();
   try {
-    var lk = Tools.Files.read(LOCK);
-    var lkText = (lk && (lk.content || lk.text)) || '';
-    var lkTs = parseInt(lkText, 10) || 0;
-    if (Date.now() - lkTs < 60000) {
-      return { success: false, message: 'worker 正在拉起中，请稍候再试。' };
+    var lf = Tools.Files.read(LEASE);
+    var lfText = (lf && (lf.content || lf.text)) || '';
+    if (lfText) {
+      var lj = null;
+      try { lj = JSON.parse(lfText); } catch (e2) {}
+      if (lj && lj.expiresAt && lj.expiresAt > now) {
+        return await pollWorkerReady(lj.launchId || launchId, 'wait-lease');
+      }
     }
   } catch (e) {}
-  try { Tools.Files.write(LOCK, String(Date.now()), false, 'android'); } catch (e) {}
-  freshKey(); // 每次拉起强制全新会话：Operit 重启初期 terminal 未就绪会留下坏会话，绝不复用
-  var ping = await httpCall('ping_worker', {});
-  if (ping && ping.success) return { success: true, alreadyUp: true };
-  // 先确保 worker.py 等在 DATA_DIR
-  try { await deployWorkerToData(); } catch (e) {}
-  var pyCmd = await detectPython();
-  if (!pyCmd) {
-    return { success: false, message: '未找到可用 python3，请手动启动：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
-  }
-  // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
-  // db 策略：权威在 /root（worker 首次运行自动生成）；数据目录是热备副本（sync_db 写回）
-  // 1) worker 在线时先 HTTP 热备 2) 兜底文件写回 3) 仅首次迁移（/root 无 db 且数据目录有，老版本升级）
-  var script = [
-    "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
-    "python3 -c \"import urllib.request,json;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765',data=json.dumps({'action':'sync_db'}).encode()),timeout=3)\" 2>/dev/null || true",
-    "if [ -f " + ROOT_DIR + "/engine.db ]; then cp -f " + ROOT_DIR + "/engine.db " + DATA_DIR + "/engine.db 2>/dev/null || true; fi",
-    "if [ ! -f " + ROOT_DIR + "/engine.db ] && [ -f " + DATA_DIR + "/engine.db ]; then cp -f " + DATA_DIR + "/engine.db " + ROOT_DIR + "/engine.db; fi",
-    "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
-    "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
-    "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
-    "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "PY=" + pyCmd + "; [ -x \"$PY\" ] || PY=/root/.venv/bin/python3.12; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || { echo NO_PYTHON; exit 1; }; setsid \"$PY\" " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
-  ].join('; ');
+  // ④ 抢租约
+  try { Tools.Files.write(LEASE, JSON.stringify({ launchId: launchId, source: 'onAppCreate', createdAt: now, expiresAt: now + 90000 }), false, 'android'); } catch (e) {}
+  // ⑤ T1 + 轻提交：hiddenExec 只提交 start_worker.sh（毫秒级返回），重活后台执行
+  cmeProbe('T1', 'launchId=' + launchId + ' source=onAppCreate');
   try {
-    if (Tools.System && Tools.System.terminal && typeof Tools.System.terminal.hiddenExec === 'function') {
-      // 探针验证 hiddenExec 直接执行多语句命令可用，无需 bash -lc 包装
-      await hiddenExecSafe(script, 30000);
-    }
+    freshKey();
+    var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
+    await withTimeout(hiddenExecSafe(submitCmd, 15000), 20000, '提交启动命令超时。');
   } catch (e) {
-    try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e2) {}
-    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) };
+    try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
+    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e2) {}
+    return { success: false, message: '提交 worker 启动失败: ' + (e && e.message ? e.message : String(e)) };
   }
-  // v2.3.2b：拉起后轮询 ping（每 2s，最长 15s）替代固定 3s 等待——
-  // worker 启动需 7-8s（proot 2s + onnx 模型加载 5s），固定 3s 必然误报"拉起后未响应"（2026-08-08 实锤）
-  var ping2 = null;
-  var _pollDeadline = Date.now() + 15000;
-  while (Date.now() < _pollDeadline) {
-    await new Promise(function (r) { setTimeout(r, 2000); });
-    ping2 = await httpCall('ping_worker', {});
-    if (ping2 && ping2.success) break;
+  cmeProbe('T2', 'launchId=' + launchId);
+  // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
+  return await pollWorkerReady(launchId, 'submitted');
+}
+
+async function pollWorkerReady(launchId, src) {
+  var LEASE = DATA_DIR + '/logs/launch_lease.json';
+  var deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    await new Promise(function (r) { setTimeout(r, 1500); });
+    var p = null;
+    try { p = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
+    if (p && p.success) {
+      cmeProbe('T6', 'launchId=' + launchId + ' src=' + src);
+      try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
+      return { success: true, started: true, launchId: launchId };
+    }
   }
-  try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
-  if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e) {}
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '），请手动启动：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+  // 超时：释放租约 + 保护窗口，允许下次重试
+  try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
+  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
@@ -569,10 +579,19 @@ async function onPromptFinalize(input) {
 }
 
 // 应用创建时尝试拉起常驻 worker（HTTP 架构：worker 常驻，首次调用即通）
-// 延迟 30 秒：实测 Operit 重启早期（数秒内）调用 hiddenExec 有 executor 会话竞态风险，
-// 可能创建坏会话导致后续永久卡；30s 是保守兜底值（并非 Ubuntu 实际需要初始化这么久）
+// 延迟 10 秒：实测 Operit 重启早期（数秒内）调用 hiddenExec 有 executor 会话竞态风险，
+// 可能创建坏会话导致后续永久卡；原 30s 为保守兜底，2026-08-09 冷启动实测 proot 0.6s/worker 2s，
+// 10s 余量充足（暖启动 2s 就绪）；若实测不稳定再回退 30s
 function onAppCreate() {
     try {
+        cmeProbe('T0');
+        // v2.4 实验开关：DISABLE_APP_CREATE_LAUNCH=1 时禁用 onAppCreate 自动拉起（归因实验用）
+        var _disable = '';
+        try { _disable = getEnv('DISABLE_APP_CREATE_LAUNCH') || ''; } catch (e) {}
+        if (_disable === '1' || _disable === 'true') {
+            jsLog('INFO', 'onAppCreate: DISABLE_APP_CREATE_LAUNCH=1，跳过自动拉起（归因实验模式）');
+            return;
+        }
         setTimeout(function () {
             (async function () {
                 // v2.1.0：先强制部署最新 worker.py 到 /root（覆盖旧版残留）
@@ -587,7 +606,8 @@ function onAppCreate() {
                         var pingV = await httpCall('ping_worker', {});
                         if (pingV && pingV.success && pingV.version && pingV.version !== fileVer) {
                             jsLog('INFO', 'worker 版本变化 ' + pingV.version + ' -> ' + fileVer + '，重启 worker');
-                            var killCmd = "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done";
+                            // v2.4：轻量 kill（worker.pid），不再遍历 /proc
+                            var killCmd = 'kill $(cat /root/character_memory_engine/worker.pid 2>/dev/null) 2>/dev/null || true';
                             await hiddenExecSafe(killCmd, 10000);
                         }
                     }
@@ -599,7 +619,7 @@ function onAppCreate() {
                 jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
                 try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
             });
-        }, 30000);
+        }, 10000);
     } catch (e) {}
     return { ok: true };
 }

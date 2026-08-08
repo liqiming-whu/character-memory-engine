@@ -28,6 +28,23 @@ import traceback
 import unicodedata
 from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+def _probe(tag):
+    try:
+        import datetime
+        _lid = os.environ.get('LAUNCH_ID', '') or ''
+        _f2 = open('/sdcard/Download/Operit/character_memory_engine/logs/cold_probe.log', 'a')
+        _f2.write("%s wall=%s mono=%.1f pid=%d launchId=%s\n" % (tag, datetime.datetime.now(datetime.timezone.utc).isoformat(), time.monotonic(), os.getpid(), _lid))
+        _f2.close()
+    except Exception:
+        pass
+# v2.4: 启动早期写 worker.pid（start_worker.sh 用它做旧进程清理，替代 /proc 遍历优先路径）
+try:
+    with open('/root/character_memory_engine/worker.pid', 'w') as _pf:
+        _pf.write(str(os.getpid()))
+except Exception:
+    pass
+_probe('T4')
+
 from pathlib import Path
 
 # ===== 方案 A：向量能力（可选，sqlite-vec + onnxruntime + BGE）=====
@@ -47,7 +64,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "2.1.7"
+VERSION = "2.1.8"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -1854,6 +1871,7 @@ def main():
             sys.stderr.write(msg + "\n")
         return
     try:
+        _probe('T5')
         server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     except Exception as e:
         tb = " | ".join(line.strip() for line in traceback.format_exc().splitlines() if line.strip())

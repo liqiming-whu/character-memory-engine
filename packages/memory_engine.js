@@ -155,6 +155,17 @@ function dbgLog(action, obj) {
   } catch (e) {}
 }
 
+// ===== v2.3.4 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
+function cmeProbe(tag, extra) {
+  try {
+    var mono = 0;
+    try { if (typeof performance !== 'undefined' && performance.now) mono = Math.round(performance.now() * 10) / 10; } catch (e) {}
+    var line = tag + ' wall=' + new Date().toISOString() + ' mono=' + mono;
+    if (extra) line += ' ' + extra;
+    Tools.Files.write('/sdcard/Download/Operit/character_memory_engine/logs/cold_probe.log', line + '\n', true, 'android');
+  } catch (e) {}
+}
+
 // 统一收尾：按 Operit 约定包装结果。
 // 关键：Operit UI 侧 parseToolResult 成功时只返回 result.data；
 // 失败时抛异常（message 取 result.message）。所以成功必须带 data 字段。
@@ -186,6 +197,7 @@ function withTimeout(promise, ms, message) {
 async function httpCall(action, payload) {
   var resp;
   try {
+    if (!(typeof globalThis !== 'undefined' && globalThis.__cmeT7)) { if (typeof globalThis !== 'undefined') globalThis.__cmeT7 = 1; cmeProbe('T7'); }
     resp = await withTimeout(
       Tools.Net.http({
         url: WORKER_URL,
@@ -253,9 +265,8 @@ async function deployWorkerToData() {
 // 尝试拉起常驻 worker（幂等：已在线则跳过；force=true 时强制完整重启）。
 // python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
 async function ensureWorkerUp(force) {
-  // v2.3.2b：冷启动/坏会话窗口保护——hiddenExec 失败后 30s 内快速失败，绝不碰 hiddenExec。
-  // 背景：Operit 重启早期（proot 未就绪）调用 hiddenExec 会创建坏会话 → 后续同 key 调用永久排队卡死
-  // （19:15:51 实锤：save_ui_state 卡 35.1s、onAppCreate 报 hiddenExec 二次超时）。
+  // v2.4：冷启动保护窗口 + 租约单飞 + 轻提交（hiddenExec 只提交，重活在 start_worker.sh 后台执行）+ health 轮询
+  // 修复：旧版 hiddenExec 执行完整重脚本，冷启动时阻塞平台工具通道 30-35s → UI 卡死闪退（2026-08-09 实锤）
   var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
   try {
     var bf = Tools.Files.read(BLOCK_FILE);
@@ -265,71 +276,62 @@ async function ensureWorkerUp(force) {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
-  // 防重入锁：文件标记（跨模块重载有效），60 秒内重复触发直接跳过，避免并发 hiddenExec 锁死会话
-  var LOCK = DATA_DIR + '/logs/launching.lock';
+  // ① health 先检（httpCall 通道，快，不占 hiddenExec）
+  var ping = null;
+  try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
+  if (ping && ping.success) return { success: true, alreadyUp: true };
+  // ② 部署最新 worker.py 等（JS 层复制，不走 hiddenExec）
+  try { await deployWorkerToData(); } catch (e) {}
+  // ③ 租约软裁决（跨模块状态落盘）：有效租约 → 不重复启动，直接轮询
+  var LEASE = DATA_DIR + '/logs/launch_lease.json';
+  var launchId = 'L' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+  var now = Date.now();
   try {
-    var lk = Tools.Files.read(LOCK);
-    var lkText = (lk && (lk.content || lk.text)) || '';
-    var lkTs = parseInt(lkText, 10) || 0;
-    if (Date.now() - lkTs < 60000) {
-      return { success: false, message: 'worker 正在拉起中，请稍候再试。' };
+    var lf = Tools.Files.read(LEASE);
+    var lfText = (lf && (lf.content || lf.text)) || '';
+    if (lfText && !force) {
+      var lj = null;
+      try { lj = JSON.parse(lfText); } catch (e2) {}
+      if (lj && lj.expiresAt && lj.expiresAt > now) {
+        return await pollWorkerReady(lj.launchId || launchId, 'wait-lease');
+      }
     }
   } catch (e) {}
-  try { Tools.Files.write(LOCK, String(Date.now()), false, 'android'); } catch (e) {}
-  freshKey(); // 每次拉起强制全新会话：Operit 重启初期 terminal 未就绪会留下坏会话，绝不复用
-  var ping = await httpCall('ping_worker', {});
-  if (!force && ping && ping.success) return { success: true, alreadyUp: true };
-  // 先确保 worker.py 等在 DATA_DIR
-  try { await deployWorkerToData(); } catch (e) {}
-  var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) return { success: false, message: '无终端能力，无法自动拉起 worker。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
-
-  var pyCmd = await detectPython();
-  if (!pyCmd) {
-    return { success: false, message: '未找到可用的 python3。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
-  }
-
-  // 复制全部 python 文件 + models + db 到 /root（ext4 稳定），worker 用 venv python 在 /root 运行
-  // db 策略：权威在 /root（worker 首次运行自动生成）；数据目录是热备副本（sync_db 写回）
-  // 1) worker 在线时先 HTTP 热备 2) 兜底文件写回 3) 仅首次迁移（/root 无 db 且数据目录有，老版本升级）
-  var script = [
-    "mkdir -p " + ROOT_DIR + "/models " + DATA_DIR + "/logs",
-    "python3 -c \"import urllib.request,json;urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:8765',data=json.dumps({'action':'sync_db'}).encode()),timeout=3)\" 2>/dev/null || true",
-    "if [ -f " + ROOT_DIR + "/engine.db ]; then cp -f " + ROOT_DIR + "/engine.db " + DATA_DIR + "/engine.db 2>/dev/null || true; fi",
-    "if [ ! -f " + ROOT_DIR + "/engine.db ] && [ -f " + DATA_DIR + "/engine.db ]; then cp -f " + DATA_DIR + "/engine.db " + ROOT_DIR + "/engine.db; fi",
-    "cp -f " + DATA_DIR + "/*.py " + ROOT_DIR + "/ 2>/dev/null || true",
-    "cp -rf " + DATA_DIR + "/models/. " + ROOT_DIR + "/models/ 2>/dev/null || true",
-    "if [ ! -f " + ROOT_DIR + "/worker.py ]; then echo 'NO_WORKER'; exit 1; fi",
-    "for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) kill $(basename $p) 2>/dev/null;; esac; fi; done; sleep 1",
-    "PY=" + pyCmd + "; [ -x \"$PY\" ] || PY=/root/.venv/bin/python3.12; [ -x \"$PY\" ] || PY=/usr/bin/python3; [ -x \"$PY\" ] || { echo NO_PYTHON; exit 1; }; setsid \"$PY\" " + ROOT_DIR + "/worker.py --port 8765 --db " + ROOT_DIR + "/engine.db >> " + DATA_DIR + "/logs/engine.log 2>&1 < /dev/null & echo started"
-  ].join('; ');
+  // ④ 抢租约
+  try { Tools.Files.write(LEASE, JSON.stringify({ launchId: launchId, source: 'ensureWorkerUp', createdAt: now, expiresAt: now + 90000 }), false, 'android'); } catch (e) {}
+  // ⑤ T1 + 轻提交：hiddenExec 只提交 start_worker.sh（毫秒级返回），重活后台执行
+  cmeProbe('T1', 'launchId=' + launchId + ' source=ensure');
   try {
-    if (typeof terminal.hiddenExec === 'function') {
-      // 探针验证 hiddenExec 直接执行多语句命令可用，无需 bash -lc 包装
-      await withTimeout(hiddenExecSafe(script, 30000), 35000, '拉起 worker 超时。');
-    } else {
-      var sess = await withTimeout(terminal.create('memory_engine_start'), 8000, '创建终端会话超时。');
-      await withTimeout(terminal.exec(sess.sessionId, script, 30000), 35000, '拉起 worker 超时。');
-      try { await terminal.close(sess.sessionId); } catch (e) {}
-    }
+    freshKey();
+    var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
+    await withTimeout(hiddenExecSafe(submitCmd, 15000), 20000, '提交启动命令超时。');
   } catch (e) {
-    try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e2) {}
-    return { success: false, message: '拉起 worker 失败: ' + (e && e.message ? e.message : String(e)) + '。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
+    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e2) {}
+    return { success: false, message: '提交 worker 启动失败: ' + (e && e.message ? e.message : String(e)) };
   }
-  // v2.3.2b：拉起后轮询 ping（每 2s，最长 15s）替代固定 3s 等待——
-  // worker 启动需 7-8s（proot 2s + onnx 模型加载 5s），固定 3s 必然误报"拉起后未响应"
-  // （2026-08-08 19:10 实锤：启动命令发出后 worker 实际 20s 内就绪，3s ping 误报失败）。
-  var ping2 = null;
-  var _pollDeadline = Date.now() + 15000;
-  while (Date.now() < _pollDeadline) {
-    await new Promise(function (r) { setTimeout(r, 2000); });
-    ping2 = await httpCall('ping_worker', {});
-    if (ping2 && ping2.success) break;
+  cmeProbe('T2', 'launchId=' + launchId);
+  // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
+  return await pollWorkerReady(launchId, 'submitted');
+}
+
+async function pollWorkerReady(launchId, src) {
+  var LEASE = DATA_DIR + '/logs/launch_lease.json';
+  var deadline = Date.now() + 45000;
+  while (Date.now() < deadline) {
+    await new Promise(function (r) { setTimeout(r, 1500); });
+    var p = null;
+    try { p = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
+    if (p && p.success) {
+      cmeProbe('T6', 'launchId=' + launchId + ' src=' + src);
+      try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
+      return { success: true, started: true, launchId: launchId };
+    }
   }
-  try { Tools.Files.write(LOCK, '', false, 'android'); } catch (e) {}
-  if (ping2 && ping2.success) return { success: true, started: true, python: pyCmd };
-  try { Tools.Files.write(DATA_DIR + '/logs/launch_blocked_until', String(Date.now() + 30000), false, 'android'); } catch (e) {}
-  return { success: false, message: '拉起后 worker 仍未响应（python=' + pyCmd + '）。请手动执行：setsid ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+  // 超时：释放租约 + 保护窗口，允许下次重试
+  try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
+  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
 // v2.3.2b：detectPython 不再做任何 JS 侧文件探测——
@@ -633,6 +635,7 @@ function tsToMs(v) {
 //   5) 分析完成后：推进水位线 + 写 trigger_result.json 文件通知前端轮询刷新（工具脚本无 setEnv，env 通道不可用）
 async function triggerAnalysis(params) {
     try {
+        cmeProbe('T8');
         var chatId = (params && params.chat_id) || '';
         var tr = await readTriggerJson() || {};
         if (!chatId && tr.chatId) chatId = String(tr.chatId);
