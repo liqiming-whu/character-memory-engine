@@ -72,6 +72,17 @@ function withRace(p, ms, msg) {
       function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
   });
 }
+// v2.4.1：补齐 withTimeout（与 memory_engine.js 同实现）。修复 onAppCreate 路径
+// ensureWorkerUp/pollWorkerReady 引用未定义函数 → health 误判失败 + 提交必失败（2026-08-09 实测暴露）
+function withTimeout(promise, ms, message) {
+  var timer;
+  return Promise.race([
+    promise,
+    new Promise(function (_, reject) {
+      timer = setTimeout(function () { reject(new Error(message || "操作超时。")); }, ms);
+    })
+  ]).finally(function () { clearTimeout(timer); });
+}
 async function hiddenExecSafe(cmd, timeoutMs) {
   var key = getKey();
   try {

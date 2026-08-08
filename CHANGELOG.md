@@ -1,20 +1,20 @@
 # Changelog
-## v2.4.0（2026-08-09，冷启动加固：启动脚本异步化 + 原子单飞 + 探针升级）
-### 背景
-- 冷启动（关机几秒后开机）进 CME 卡死闪退经 logcat 实锤为**系统层 init SIGABRT**（开机早期系统不稳定，Operit 被波及），与 CME 代码无关（DISABLE_APP_CREATE_LAUNCH=1 对照组 CME 零调用仍复现）
-- 但排查中实锤了 CME 自身的真实工程缺陷并修复：双入口并发 hiddenExec（T1×2/T4×2/T2×2）+ 重脚本同步阻塞平台工具通道
-### 修复
-- **hiddenExec 轻提交**：ensureWorkerUp 不再让 hiddenExec 执行完整重脚本，只提交 `nohup setsid bash start_worker.sh ... &`（T1→T2 0.5s，旧版 3.5-4.5s/冷启动 30s+）
-- **start_worker.sh 后台化**：复制/杀旧/启动全部移入独立脚本，`mkdir /tmp/cme_start_worker.lock` 原子互斥单飞（双提交第二个立即退出），setsid + 三路 stdio 重定向完全脱离
-- **租约软裁决**：JS 层 launch_lease.json（launchId/source/createdAt/expiresAt=90s）跨模块防并发，shell 层原子互斥兜底
-- **health 轮询**：提交后 httpCall 轮询（1.5s×45s）替代 hiddenExec 内等待，T6 探针记录就绪时刻；超时释放租约+保护窗口
-- **onAppCreate 开关**：DISABLE_APP_CREATE_LAUNCH=1 可禁用自动拉起（归因实验用）；版本检查 kill 改 worker.pid 轻量实现
-- **worker.py v2.1.8**：LAUNCH_ID 环境变量透传探针（T4/T5 带 launchId）、启动写 worker.pid
-- **探针升级**：T1 带 launchId/source、新增 T3（后台脚本进入）/T6（health 首次成功）
-### 验证
-- 暖启动 ×3 正常；等系统稳定后冷启动进入正常（worker 拉起 3.6s）；cold_probe 22:00 段：T2<T4<T5 时序正确、双提交被原子互斥拦截（start_worker.log "another instance running, exit"）、worker 唯一无二次替换
-- 残余：JS 租约检查-写入非原子（双入口同时通过），shell 层兜底无功能影响，可后续优化
-# Changelog
+## v2.4.1（2026-08-09，onAppCreate 预热链路修复——withTimeout 未定义）
+### 修复：main.js 引用未定义 withTimeout → onAppCreate 自动预热从未生效
+- **现象**：恢复 DISABLE_APP_CREATE_LAUNCH=0 后 engine.log 报 `onAppCreate: worker 未就绪: 提交 worker 启动失败: 'withTimeout' is not defined`
+- **根因**：v2.4.0 重构 ensureWorkerUp/pollWorkerReady 时引入 `withTimeout` 调用（health 先检/提交/轮询共 3 处），但 main.js 只定义了 `withRace`（功能等价、名字不同），未定义 `withTimeout`。memory_engine.js 有自己的 withTimeout 定义所以 UI 路径正常；main.js 的 onAppCreate 路径每次执行：health 先检抛错被 catch 吞掉 → 误判 worker 不在线 → 提交必失败 → 删租约 + 写 30s BLOCK。DISABLE_APP_CREATE_LAUNCH=1 归因实验期间该路径从未执行，缺陷被掩盖，恢复后首曝
+- **修复**：main.js 补 `withTimeout`（与 memory_engine.js 同实现，Promise.race + finally 清 timer）
+- **验证**：重启 app → onAppCreate 10.1s 到点 → T1(source=onAppCreate) → 提交 1.25s → T6 就绪 3.0s → 用户进 CME health 直过（T7 无第二条 T1，秒开无卡顿）；cold_probe 单条 T1、start_worker.log 单条 begin+launched、pid 唯一、engine.log 零 WARN
+## v2.4.0（2026-08-09，冷启动加固——启动脚本异步化+原子单飞+探针升级）
+### 修复：hiddenExec 同步执行重型启动脚本 → 冷启动阻塞平台工具通道 30-35s → UI 卡死闪退
+- **根因链**（源码 + 实测实锤）：双入口（main.js onAppCreate / memory_engine.js UI 路径）各自 ensureWorkerUp → freshKey 换 key → 并发 hiddenExec 提交完整重脚本（/proc 遍历 kill 旧 worker、cp models、sync_db）→ 同 executorKey 常驻 shell mutex 串行 + wait $pid → 平台工具通道被占 30s+ → UI 卡死闪退；双入口无有效互斥 → 互相 kill 新起的 worker
+- **修复**：
+  - P0 hiddenExec 轻提交：只提交 `nohup setsid bash start_worker.sh &`（毫秒级），重活全部移入 start_worker.sh 后台执行
+  - start_worker.sh：`mkdir /tmp/cme_start_worker.lock` 原子互斥（双提交第二个立即退出）+ 三路 stdio 完全脱离 + LAUNCH_ID 透传
+  - P1 原子单飞：JS 层 launch_lease.json 租约软裁决（launchId/source/createdAt/expiresAt=90s）+ shell 层原子互斥兜底，双入口统一 health 先检 → 租约 → 轻提交 → pollWorkerReady 轮询（T6，1.5s×45s）
+  - 探针升级：T1 带 launchId/source、新增 T3（脚本内）/T6（health）；worker.py v2.1.8（LAUNCH_ID 透传 + worker.pid 落盘）
+  - onAppCreate 实验开关 DISABLE_APP_CREATE_LAUNCH（归因实验用）
+- **验证**：T1→T2 从数秒/冷启动 30s+ 缩短至 0.5s；双提交被 shell 原子互斥拦截（start_worker.log "another instance running, exit"）；worker pid 唯一无二次替换；实机冷启动/暖启动多次验收通过
 ## v2.3.3（2026-08-09，渲染风暴时间闸修复——前端卡死闪退）
 ### 修复：角色页/知识页渲染闭包调度无节流 → 渲染风暴 → ANR 闪退（app 被杀连带 worker）
 - **现象**：侧边栏打开后前端卡死闪退；重启 app 卡顿不消失（旧代码风暴每次打开必复现，代码级）；卡死瞬间无日志（JS 线程被占满写不出）
