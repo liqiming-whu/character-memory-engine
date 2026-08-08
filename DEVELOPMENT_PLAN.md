@@ -350,6 +350,30 @@ terminal.hiddenExec + worker + SQLite + JSON payload
   3. 真机验证（2026-08-08 16:03 PASS）：用户发消息后 trigger.json 的 watermarks/lastAnalyzedAt 等 6 字段全部保留，chatId/cooldownStart 正常刷新
 - 剩余项：setEnv('MEMORY_SYSTEM_TRIGGER_RESULT') 沙盒可用性仍待确认（CME 已 try-catch 包裹、失败静默）；CMS 12.2（自动分析完成但 UI 不刷新）同源问题在 CMS 侧另行处理
 - 状态：**已完成，真机验证 PASS（2026-08-08 16:03）**
+
+### v2.3.1 并发与反馈链路修复（**已闭环**，2026-08-08 16:10-17:00）
+- 背景：水位线修复后实测仍有两个新问题——① 自动分析误报 194 条新消息；② 分析完成前端无反馈
+- 根因①（194 误判，dbg_call 实锤）：`analyze_chat` 完成正在写 trigger.json（**非原子覆盖写**），`trigger_analysis` 并发读到**半写损坏 JSON** → parse 失败 → 空 trigger → watermarks 归零 → 200 条窗口全判新（=194）。**与上午转圈同源：并发竞争（这次是文件读-写）**
+- 根因②（前端无反馈，dbg_call/dbg_ui 交叉实锤）：init 时 `save_ui_state + load_life_data + trigger_analysis` **三路并发 bridge 响应错配**（worker 实际返回 started=true count=2，前端收到 started=undefined）→ 前端 `started=true` 才进"分析中+轮询"分支 → started 缺失 → 永不轮询 → 完成无反馈
+- 根因③（链路断点，env_preferences.xml 实锤）：**工具脚本环境无 setEnv**（env 里只有 main.js 写的 4 个键，`MEMORY_SYSTEM_TRIGGER_RESULT` 从未写入）→ 轮询 env 永远读不到完成 → 死等
+- 修复（已实施，全部烧录）：
+  1. **原子写**：`writeTriggerAtomic`（tmp + move 同目录 rename 原子替换）——memory_engine.js ×3 + main.js ×2
+  2. **读取重试**：readTriggerJson parse 失败重试 3 次（150ms 间隔）
+  3. **损坏保护**：main.js 读异常跳过写入保留旧文件
+  4. **前端串行队列**：screen.js 18 处 callTool 全部改 `serialCall`（globalThis promise 链，物理消灭并发 → bridge 错配免疫，CMS v1.8.2 同款）
+  5. **兜底轮询**：响应异常（started/skipped 缺失）也启动 startTriggerPoll（90s）
+  6. **文件通道**：新增 `get_trigger_result` 工具（原子写 trigger_result.json + 读 JSON 返回），前端两处轮询改调工具，METADATA 工具数 29→30
+- 显示修复（已实施）：
+  1. `resultText` 是持久化 state（`useState('resultText')`），重进初始渲染读上次残留 → **init 同步清空**
+  2. **异步 setState 不触发重渲染**（实测：16:26-16:29 渲染探针零日志，仅用户交互刷新画面）→ 统一 `setResultText` = setState + **强制渲染 tick**（Date.now() 不同值）
+  3. 自动分析启动/完成同步 `analyzing` 按钮态（⏳分析中/复位）
+- 渲染风暴收敛（16:41 实测 10 秒 12 次渲染拖垮 UI 容器后修复）：
+  1. tick 合并（setTimeout 归并，连续 setResultText 只渲染一次）
+  2. save_ui_state 磁盘写防抖 500ms（渲染期 I/O 放大消除，setEnv 仍同步）
+  3. 完成分支**先显示文案再 await loadData**（文案不等数据）
+  4. 移除测试渲染探针
+- 验证：16:26/16:41 真机——"检测到 4 条新对话"立即显示 ✓、完成自动变"后台分析完成：发现 2 条新内容" ✓、重进残留清除 ✓、按钮态 ✓、水位线增量（不再 194）✓
+- 已知遗留（**用户确认暂缓**）：切换 tab 才显示——Operit 平台渲染调度限制，tick 强制后大部分场景即时显示，个别场景仍依赖交互渲染；用户判定当前优化已足够，收尾
 ### 冷启动 ANR 卡死（**v2.3.1 优先，2026-08-08 09:00 实锤**）
 - 现象：Operit 冷启动后**第一次打开 CME 卡死、app 闪退**；重启 Operit 后第二次打开 CME 完全正常
 - 证据链（2026-08-08 09:00 实测）：

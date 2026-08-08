@@ -430,6 +430,32 @@ async function onPromptInput(input) {
     return null;
   }
 }
+// ===== v2.3.1：trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
+async function writeTriggerAtomicMain(obj) {
+  var tmp = TRIGGER_FILE + '.tmp';
+  try {
+    await Tools.Files.write(tmp, JSON.stringify(obj, null, 2), false, 'android');
+    await Tools.Files.move(tmp, TRIGGER_FILE);
+  } catch (e) {
+    await Tools.Files.write(TRIGGER_FILE, JSON.stringify(obj, null, 2), false, 'android');
+  }
+}
+// 读 trigger.json：返回 {ok:true,data} / {ok:false,missing:true} / {ok:false,missing:false}(损坏)
+async function readTriggerJsonMain() {
+  for (var i = 0; i < 3; i++) {
+    try {
+      var raw = await Tools.Files.read(TRIGGER_FILE);
+      if (raw && raw.content) {
+        var parsed = JSON.parse(raw.content);
+        if (parsed && typeof parsed === 'object') return { ok: true, data: parsed };
+      } else {
+        return { ok: false, missing: true };
+      }
+    } catch (e) {}
+    await new Promise(function (res) { setTimeout(res, 150); });
+  }
+  return { ok: false, missing: false };
+}
 async function onPromptFinalize(input) {
   var evt = (input && input.eventPayload) || {};
   var stage = String(evt.stage ?? input.eventName ?? "");
@@ -460,9 +486,12 @@ async function onPromptFinalize(input) {
     }
 
     var trigger = null;
+    var triggerReadOk = false;
+    var triggerMissing = false;
     try {
-      var tr = await Tools.Files.read(TRIGGER_FILE);
-      if (tr && tr.content) trigger = JSON.parse(tr.content);
+      var tr = await readTriggerJsonMain();
+      if (tr && tr.ok) { trigger = tr.data; triggerReadOk = true; }
+      else if (tr && tr.missing) { triggerMissing = true; }
     } catch (e) {
       jsLog('DEBUG', 'onPromptFinalize: 读 trigger 失败: ' + (e.message || String(e)));
     }
@@ -478,9 +507,12 @@ async function onPromptFinalize(input) {
       if (trigger.lastCheckedAt) nextTrigger.lastCheckedAt = trigger.lastCheckedAt;
       if (trigger.lastCheckedChatId) nextTrigger.lastCheckedChatId = trigger.lastCheckedChatId;
     }
-    if (!trigger) {
+    if (!triggerReadOk && !triggerMissing) {
+      // v2.3.1：trigger.json 读取异常（并发半写/损坏）→ 跳过本次更新，保留旧文件与水位线
+      jsLog('WARN', 'onPromptFinalize: trigger.json 读取异常，本次跳过更新（避免清空水位线）');
+    } else if (!trigger) {
       try {
-        await Tools.Files.write(TRIGGER_FILE, JSON.stringify(nextTrigger, null, 2), false, 'android');
+        await writeTriggerAtomicMain(nextTrigger);
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 写 trigger 失败: ' + (e.message || String(e)));
       }
@@ -499,7 +531,7 @@ async function onPromptFinalize(input) {
         autoAnalyzeChat(processChatId, trigger.callerCardId || callerCardId, trigger.personaName || personaName).catch(function() {});
       }
       try {
-        await Tools.Files.write(TRIGGER_FILE, JSON.stringify(nextTrigger, null, 2), false, 'android');
+        await writeTriggerAtomicMain(nextTrigger);
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 更新 trigger 失败: ' + (e.message || String(e)));
       }
