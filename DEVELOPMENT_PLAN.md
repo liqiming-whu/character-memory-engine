@@ -347,9 +347,9 @@ terminal.hiddenExec + worker + SQLite + JSON payload
 - 修复（已实施，v2.3.1 ①，2026-08-08 16:00）：
   1. main.js onPromptFinalize 写 trigger.json 前先读旧值构造 nextTrigger，**合并保留** `watermarks`/`lastAnalyzedAt`/`lastAnalyzedChatId`/`lastAnalyzedNewCount`/`lastResult`/`lastCheckedAt`/`lastCheckedChatId`；两处整写（首次写入 + 更新写入）统一改为写 nextTrigger
   2. 验证：`node --check` 语法通过；合并逻辑断言全 PASS（旧字段保留、新 chatId/cooldownStart/personaName 生效）
-  3. 待真机验证：发消息后 trigger.json 的 watermarks 不再消失；下次打开插件为增量分析而非全量
+  3. 真机验证（2026-08-08 16:03 PASS）：用户发消息后 trigger.json 的 watermarks/lastAnalyzedAt 等 6 字段全部保留，chatId/cooldownStart 正常刷新
 - 剩余项：setEnv('MEMORY_SYSTEM_TRIGGER_RESULT') 沙盒可用性仍待确认（CME 已 try-catch 包裹、失败静默）；CMS 12.2（自动分析完成但 UI 不刷新）同源问题在 CMS 侧另行处理
-- 状态：**代码已完成，真机验证待 v2.3.1 整体打包后确认**
+- 状态：**已完成，真机验证 PASS（2026-08-08 16:03）**
 ### 冷启动 ANR 卡死（**v2.3.1 优先，2026-08-08 09:00 实锤**）
 - 现象：Operit 冷启动后**第一次打开 CME 卡死、app 闪退**；重启 Operit 后第二次打开 CME 完全正常
 - 证据链（2026-08-08 09:00 实测）：
