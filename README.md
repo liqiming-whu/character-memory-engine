@@ -74,6 +74,7 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
      - 识别坏会话：子 shell（`bash --noprofile --norc` 或 `bash -il`）状态为 S + `wchan` 为 `pipe_read` / `do_select`（卡在管道/IO 等待）
      - 清理：`kill -9 <子shell> <bash会话> <对应proot>`（先杀子 shell 再杀 bash 再杀 proot）；Operit 会自动重建新 proot 与 hiddenExec 会话
      - 收尾：删除 `logs/channel_broken.json` / `logs/launch_blocked_until` / `logs/launch_lease.json`（清除熔断与保护窗口），再调用任一工具触发拉起
+     - **验证恢复（2026-08-10 实机记录）**：清理前 cold_probe 显示 T1（提交）后无 T2/T3（挂起）；清理并清熔断后，再次调用工具触发拉起，cold_probe 出现 **T1→T3（脚本内）→T4/T5（worker 启动 pid）→T6（就绪）** 完整链路，start_worker.log 记录 `launched`——以 T3 是否出现为 hiddenExec 通道恢复的标志
   2. **【不重启】途径 B：绕过 hiddenExec 直接拉起 worker**（2026-08-10 实测有效）
      - worker 是 HTTP 常驻服务（127.0.0.1:8765），不依赖 hiddenExec 通道
      - 执行：`LAUNCH_ID=L_manual_$(date +%s) setsid nohup bash /root/character_memory_engine/start_worker.sh </dev/null >> /sdcard/Download/Operit/character_memory_engine/logs/start_worker.log 2>&1 &`
