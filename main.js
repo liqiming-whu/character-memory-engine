@@ -195,8 +195,16 @@ try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 // 熔断：首次提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交（onAppCreate/UI 双入口共享）
 // 恢复：onAppCreate 启动时清除（App 实例重建即恢复）；60s 冷却过期自动允许重试一次；用户打开终端页面后重试
 // 通道：文件（memory_engine.js 工具脚本环境无 setEnv，统一文件通道）
+// v2.4.5：内存标志兜底——第 17 轮实锤「JS 文件写入早期不可用」导致首败后熔断不生效（10 次提交风暴 ~1min）；
+// 改为内存优先 + 文件 best-effort：文件写失败时本 VM 内后续提交仍立即熔断（App 重启 VM 重建，内存自动归零，语义不变）
+var _memBrokenAt = 0;
 var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
 function isChannelBroken() {
+  // 内存标志优先（本 VM 生命周期内生效）
+  if (_memBrokenAt > 0) {
+    if (Date.now() - _memBrokenAt > 60000) { _memBrokenAt = 0; return false; }
+    return true;
+  }
   try {
     var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
     var t = (f && (f.content || f.text)) || '';
@@ -204,13 +212,16 @@ function isChannelBroken() {
     var j = JSON.parse(t);
     if (!(j && j.broken)) return false;
     if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
+    _memBrokenAt = j.at || Date.now(); // 同步进内存
     return true;
   } catch (e) { return false; }
 }
 function setChannelBroken() {
-  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: Date.now() }), false, 'android'); } catch (e) {}
+  _memBrokenAt = Date.now(); // 内存先行：文件写失败也不丢熔断状态
+  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: _memBrokenAt }), false, 'android'); } catch (e) {}
 }
 function clearChannelBroken() {
+  _memBrokenAt = 0;
   try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
 }
 
@@ -627,6 +638,14 @@ async function onPromptFinalize(input) {
 function onAppCreate() {
     try {
         cmeProbe('T0');
+        // v2.4.5：冷却期尊重（ChatGPT 评估后升级为第一优先）——
+        // 上次失败留下的 broken 在冷却期内继续生效：跳过自动拉起，避免启动阶段主动制造更多会话压力
+        //（第 21/22/23 轮实锤「提交 = 会话制造」，启动早期提交会提高 Terminal Manager 恢复失败概率）
+        // 冷却过期后由 UI 路径自动重试（isChannelBroken 过期即清除，语义不变）
+        if (isChannelBroken()) {
+            jsLog('INFO', 'onAppCreate: 通道冷却期内（上次启动失败），跳过自动拉起，等待冷却过期后 UI 路径重试');
+            return;
+        }
         // v2.4.3：新 App 实例启动 → 清除上次会话级熔断（避免异常状态污染本次正常启动）
         clearChannelBroken();
         // v2.4 实验开关：DISABLE_APP_CREATE_LAUNCH=1 时禁用 onAppCreate 自动拉起（归因实验用）
