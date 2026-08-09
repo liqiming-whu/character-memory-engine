@@ -158,7 +158,7 @@ function dbgLog(action, obj) {
   } catch (e) {}
 }
 
-// ===== v2.3.4 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
+// ===== 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
 function cmeProbe(tag, extra) {
   try {
     var mono = 0;
@@ -239,7 +239,7 @@ async function deployWorkerToData() {
     // worker.py
     try {
       var wSrc = await ToolPkg.readResource('engine_worker_py', 'worker.py', false);
-      // v2.1.0：强制覆盖，避免 /root 残留旧版 worker.py 导致分析/截断修复不生效
+      // 强制覆盖，避免 /root 残留旧版 worker.py 导致分析/截断修复不生效
       if (wSrc) await Tools.Files.copy(String(wSrc), ROOT_DIR + '/worker.py', true, 'android', 'linux');
     } catch (e) {}
     // embed.py
@@ -265,10 +265,10 @@ async function deployWorkerToData() {
   }
 }
 
-// ===== v2.4.3：会话级熔断（与 main.js 同构，文件通道——工具脚本环境无 setEnv）=====
+// ===== 会话级熔断（与 main.js 同构，文件通道——工具脚本环境无 setEnv）=====
 // 首次 hiddenExec 提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交
 // 恢复：App 重启 onAppCreate 清除；60s 过期自动允许重试一次；用户打开终端页面后重试
-// v2.4.5：内存标志兜底——文件写失败时（第 17 轮实锤 JS 写入早期不可用）本 VM 内后续提交仍立即熔断
+// 内存标志兜底——文件写失败时（第 17 轮实锤 JS 写入早期不可用）本 VM 内后续提交仍立即熔断
 var _memBrokenAt = 0;
 var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
 function isChannelBroken() {
@@ -311,7 +311,7 @@ async function ensureWorkerUp(force) {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
-  // v2.4.3：会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
+  // 会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
   if (isChannelBroken()) {
     return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请打开一次终端页面后重试，或重新启动 Operit。' };
   }
@@ -343,11 +343,11 @@ async function ensureWorkerUp(force) {
   try {
     freshKey();
     var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    // v2.4.3：提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
+    // 提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
     await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
   } catch (e) {
     try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    // v2.4.3：BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
+    // BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
     try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
     setChannelBroken();
     return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面手动清理会话后重试，或重新启动 Operit。' };
@@ -370,13 +370,13 @@ async function pollWorkerReady(launchId, src) {
       return { success: true, started: true, launchId: launchId };
     }
   }
-  // 超时：释放租约 + 保护窗口（v2.4.3：30s→60s，避免坏通道上过快重试堆积），允许下次重试
+  // 超时：释放租约 + 保护窗口（30s→60s，避免坏通道上过快重试堆积），允许下次重试
   try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
   try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
   return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
-// v2.3.2b：detectPython 不再做任何 JS 侧文件探测——
+// detectPython 不再做任何 JS 侧文件探测——
 // ① hiddenExec 探测会卡 8s×N（32s 阻塞 → ANR/闪退，2026-08-08 实锤）；
 // ② Tools.Files.exists(...,'linux') 在当前 Operit 版本不可靠（实测返回空对象，误报 python3 不存在）。
 // python 路径由 deploy_install 固定创建（项目 venv），存在性校验下沉到启动脚本 bash [ -x ]（毫秒级）。
@@ -384,8 +384,7 @@ async function detectPython() {
   return ROOT_DIR + '/.venv/bin/python3.12';
 }
 
-// hiddenExec 会话策略（v1.0.6+多轮实测）：
-// 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
+// hiddenExec 会话策略（多轮实测）: // 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
 // 2. 方案：key 持久化到文件（跨模块重载有效）+ 失败自动漂移新 key（自愈），正常时固定 1 个会话零膨胀
 var KEY_FILE = '/sdcard/Download/Operit/character_memory_engine/logs/exec_key';
 function getKey() {
@@ -457,7 +456,7 @@ function run(action, payload) {
 // 工具导出：显式 exports（Operit subpackage 解析器识别显式导出名）
 function makeTool(action) {
   return function (params) {
-    // v2.1.0：计时探针——记录每次工具调用从 UI 发起点到返回的总耗时（定位 Operit 调用层开销）
+    // 计时探针——记录每次工具调用从 UI 发起点到返回的总耗时（定位 Operit 调用层开销）
     var t0 = Date.now();
     return run(action, params || {}).then(function (result) {
       dbgLog('timing', { action: action, ms: Date.now() - t0 });
@@ -470,7 +469,7 @@ function makeTool(action) {
 }
 
 exports.list_memories = makeTool("list_memories");
-// v2.4.2 诊断探针：纯 JS 轻量工具（不依赖 worker、不调 ensureWorkerUp）
+// 诊断探针：纯 JS 轻量工具（不依赖 worker、不调 ensureWorkerUp）
 // 用于区分「平台 Tool 回调通道整体阻塞」vs「CME 内部 ensureWorkerUp 锁传播」
 // 用法：暖启动卡死时调用本工具，若延迟 ~20s → 平台通道被阻塞；若立即返回 → CME 内部传播
 function pingJs(params) {
@@ -506,7 +505,7 @@ exports.deploy_install = deployInstall;
 exports.deploy_restart = deployRestart;
 exports.save_ui_state = makeTool("save_ui_state");
 
-// ===== v2.3.1：分析完成结果落文件（工具脚本环境无 setEnv，env 通道不可用；改用文件通道）=====
+// ===== 分析完成结果落文件（工具脚本环境无 setEnv，env 通道不可用；改用文件通道）=====
 async function writeTriggerResultFile(obj) {
     var p = '/sdcard/Download/Operit/character_memory_engine/trigger_result.json';
     var tmp = p + '.tmp';
@@ -541,7 +540,7 @@ exports.get_logs = makeTool("get_logs");
 async function analyzeChat(params) {
     try {
         var chatId = (params && params.chat_id) || '';
-        // v2.1.0：优先用 trigger.json 的当前对话（main.js 每次消息都会更新，最可靠）
+        // 优先用 trigger.json 的当前对话（main.js 每次消息都会更新，最可靠）
         if (!chatId) {
             try {
                 var tj = await readTriggerJson();
@@ -639,7 +638,7 @@ async function analyzeChat(params) {
 }
 exports.analyze_chat = analyzeChat;
 
-// ===== v2.3.1：trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
+// ===== trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
 async function writeTriggerAtomic(obj) {
     var p = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
     var tmp = p + '.tmp';
@@ -746,7 +745,7 @@ async function triggerAnalysis(params) {
         }
         // 有新消息：后台异步分析，立即返回不阻塞 UI
         var count = newMessages.length;
-        // v2.3.2b：启动分析前先写"进行中"标记（无 finishedAt），
+        // 启动分析前先写"进行中"标记（无 finishedAt），
         // 防止 UI 轮询 get_trigger_result 读到上一次的失败/旧结果而误显示（如"未找到可用 python3"）。
         try {
             await writeTriggerResultFile({

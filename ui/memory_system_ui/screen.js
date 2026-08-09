@@ -64,7 +64,7 @@ function Screen(ctx) {
   }
   var analyzingState = ctx.useState('analyzing', false);
   var resultState = ctx.useState('resultText', '');
-  var renderTickState = ctx.useState('renderTick', 0); // v2.3.1: 异步 setState 不触发渲染的强制刷新 tick
+  var renderTickState = ctx.useState('renderTick', 0); // 异步 setState 不触发渲染的强制刷新 tick
   var showCfgState = ctx.useState('showCfg', false);
   var queryState = ctx.useState('query', (uiBoot.query !== undefined ? uiBoot.query : ''));
   var dateStartState = ctx.useState('dateStart', (uiBoot.dateStart !== undefined ? uiBoot.dateStart : ''));
@@ -106,7 +106,7 @@ function Screen(ctx) {
   }
   var screenCharMemoriesState = ctx.useState('screenCharMemories', []);
 var uiSaveRef = ctx.useRef('uiSaveRef', '');
-var _uiSaveTimer = null; // v2.3.1: save_ui_state 磁盘写防抖
+var _uiSaveTimer = null; // save_ui_state 磁盘写防抖
   var memoryLoadingState = ctx.useState('memLoading', false);
   var pendingDeleteState = ctx.useState('pendingDelete', '');
   // 联系人 Tab：选中联系人同步恢复
@@ -135,12 +135,12 @@ var totalChatsState = ctx.useState('msgs_totalChats', (uiBoot.totalChats !== und
   var apiKey = cfgKey[0], setApiKey = cfgKey[1];
   var model = cfgModel[0], setModel = cfgModel[1];
 var initRef = ctx.useRef('init', false);
-  // v2.3.1: 统一结果文案——setState 后强制 tick 触发渲染（实测：异步 setState 不触发重渲染，需用户交互才显示）
+  // 统一结果文案——setState 后强制 tick 触发渲染（实测：异步 setState 不触发重渲染，需用户交互才显示）
   var _resultTickTimer = null;
-  // v2.3.2b 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
+  // 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
   // stateChange → 中间渲染推送平台重绘，19:48 真机生效）；此处的 renderTick 仅作窗口关闭后兜底。
   function _operitRerender() {
-    // v2.3.2b 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
+    // 最终态：异步渲染依赖根节点 onLoad 的 120s action 窗口（平台 action 分发订阅
     // stateChange → 中间渲染推送），此处的 renderTick 仅作窗口关闭后的兜底。
     try { renderTickState[1](Date.now()); } catch (e) {}
   }
@@ -151,7 +151,7 @@ var initRef = ctx.useRef('init', false);
       _resultTickTimer = setTimeout(function() { _resultTickTimer = null; _operitRerender(); }, 0);
     } catch(e) {}
   }
-  // v2.3.2b：异步数据更新后的强制渲染 tick（平台异步 setState 不触发重绘，需用户交互才显示；
+  // 异步数据更新后的强制渲染 tick（平台异步 setState 不触发重绘，需用户交互才显示；
   // 归并防抖：同一批次多次调用合并为一次，避免渲染风暴）
   var _forceTickTimer = null;
   function forceRenderTick(delayMs) {
@@ -169,10 +169,10 @@ var dataLoadScheduledRef = ctx.useRef('dataLoadScheduled', false);
 var personaCacheRef = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
 var memoryLoadScheduledRef = ctx.useRef('memoryLoadScheduled', false);
 var characterLoadScheduledRef = ctx.useRef('characterLoadScheduled', false);
-// v2.3.3: 渲染闭包调度时间闸——角色页/知识页每次渲染都进调度分支(ref仅防同帧)，未命中缓存路径每次触发都 callTool→setState→再渲染→再触发(渲染风暴)；120s onLoad 窗口内风暴渲染全部推送平台主线程→过载 ANR 闪退(2026-08-09 实锤)
+// 渲染闭包调度时间闸——角色页/知识页每次渲染都进调度分支(ref仅防同帧)，未命中缓存路径每次触发都 callTool→setState→再渲染→再触发(渲染风暴)；120s onLoad 窗口内风暴渲染全部推送平台主线程→过载 ANR 闪退(2026-08-09 实锤)
 var characterLoadAtRef = ctx.useRef('characterLoadAt', 0);
 var memoryLoadAtRef = ctx.useRef('memoryLoadAt', 0);
-// ===== v2.3.1：全局串行调用队列（bridge 响应错配免疫，CMS 同款方案）=====
+// ===== 全局串行调用队列（bridge 响应错配免疫，CMS 同款方案）=====
 function serialCall(toolName, params) {
   var g = (typeof globalThis !== 'undefined' ? globalThis : window);
   g.__cmeSerialCtx = g.__cmeSerialCtx || { p: Promise.resolve() };
@@ -182,15 +182,15 @@ function serialCall(toolName, params) {
   g.__cmeSerialCtx.p = run.catch(function () {});
   return run;
 }
-var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC || 0) + 1); // v2.1.2实验：模块级计数器——同实例/同WebView内递增，整页重载才归1
+var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC = ((typeof globalThis !== 'undefined' ? globalThis : window).__dbgRC || 0) + 1); // 实验：模块级计数器——同实例/同WebView内递增，整页重载才归1
   if (!initRef.current) {
  initRef.current = true;
- dbgUi('mount', '实例创建 tab=' + (tabState[0] !== undefined ? tabState[0] : '?') + ' r=' + dbgRenderCount); // v2.1.2实验：组件实例创建标记（配合模块级计数器判断重建 vs 整页重载）
- dbgUi('init', '首次渲染，触发分析'); // v2.1.0：重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
+ dbgUi('mount', '实例创建 tab=' + (tabState[0] !== undefined ? tabState[0] : '?') + ' r=' + dbgRenderCount); // 实验：组件实例创建标记（配合模块级计数器判断重建 vs 整页重载）
+ dbgUi('init', '首次渲染，触发分析'); // 重置上次会话残留的分析中状态（useState 跨重启持久化可能导致按钮卡住）
  analyzingState[1](false);
-  setResultText(''); // v2.3.1: 清持久化残留（重进不再显示上次分析结果）
+  setResultText(''); // 清持久化残留（重进不再显示上次分析结果）
   // ===== 自动触发分析：检测上次以来是否有新对话内容 =====
-  // v2.3.2b：延迟 8s 触发——Operit 重启早期（proot 未就绪）立即调用 trigger_analysis
+  // 延迟 8s 触发——Operit 重启早期（proot 未就绪）立即调用 trigger_analysis
   // 会经 ensureWorkerUp 触发 hiddenExec 会话竞态（坏会话→后续拉起永久卡，19:15 实锤）；
   // 8s 让 proot 完成重建（实测 2s）+ 保守余量。onAppCreate 另有 30s 延迟兜底。
   setTimeout(function() {
@@ -217,7 +217,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
                try {
                  var parsed = JSON.parse(envResult);
                  if (parsed && parsed.finishedAt) {
-                    analyzingState[1](false); // v2.3.1: 分析结束→按钮复位
+                    analyzingState[1](false); // 分析结束→按钮复位
                    if (parsed.success && parsed.hasData) {
                      setResultText('后台分析完成：发现 ' + (parsed.newMessageCount || countHint || 0) + ' 条新内容');
                      await loadData();
@@ -244,7 +244,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
         // 异步分析已启动 → 显示"分析中"并轮询刷新数据
         var __estSec = Math.max(15, Math.min(120, Math.ceil((r.newMessageCount || 0) * 3)));
         setResultText('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计约 ' + __estSec + ' 秒），你可以先做其他事，分析完成后将自动刷新');
-        analyzingState[1](true); // v2.3.1: 自动分析启动→按钮显示分析中
+        analyzingState[1](true); // 自动分析启动→按钮显示分析中
        triggerPollRef.current += 1;
        var pollId = triggerPollRef.current;
        var startMs = Date.now();
@@ -266,7 +266,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
                try {
                  var parsed = JSON.parse(envResult);
                  if (parsed && parsed.finishedAt) {
-                    analyzingState[1](false); // v2.3.1: 分析结束→按钮复位
+                    analyzingState[1](false); // 分析结束→按钮复位
                    // 分析已结束
                    if (parsed.success && parsed.hasData) {
                      setResultText('后台分析完成：发现 ' + (parsed.newMessageCount || 0) + ' 条新内容');
@@ -292,7 +292,7 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
      } else if (r && !r.success) {
        setResultText('检测失败：' + (fmtErr(r.message || r.error || '未知')));
      } else {
-       // v2.3.1：响应异常（bridge 错配/形状未知）→ 保守启动兜底轮询，分析完成仍能刷新
+       // 响应异常（bridge 错配/形状未知）→ 保守启动兜底轮询，分析完成仍能刷新
        dbgUi('init', '响应异常（started/skipped 缺失），启动兜底轮询');
        setResultText('正在检测对话内容…');
        startTriggerPoll(0, '正在检测对话内容…');
@@ -305,9 +305,9 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
   // 首次状态为空时读取一次；后续由根节点 onLoad、分析完成或用户操作明确刷新。
   // 用 state（dataLoadedState）作唯一权威：只要数据未加载就重新调度，避免 useRef 在
   // 快速切换实例复用时残留 true 导致加载永久跳过。
-  // v2.1.0：时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
+  // 时间戳守卫——已加载 60 秒内不重载；跨重启残留旧时间戳自动过期，避免"以为加载过但数据为空"
   var dataLoadedTs = Number(dataLoadedState[0] || 0);
-  // v2.1.5 P0-2b：失败自驱重试——不再依赖 render 驱动（Operit 相同值 setState 不触发重渲染，
+  // P0-2b：失败自驱重试——不再依赖 render 驱动（Operit 相同值 setState 不触发重渲染，
   // 失败后若无用户操作会冻结在"正在读取"；失败时自排队下一次，成功或达上限才停止）
   function retryLoadData() {
     if (dataLoadScheduledRef.current) return;
@@ -442,7 +442,7 @@ loadingChatsState[1](false);
   var _dbgLastTool = 0;
   var _dbgLastEnv = 0;
   // 写 dbg_ui.log（经 log_ui 工具，不经 worker）+ env 环形缓冲兜底
-  // v2.2.4（CMS v1.8.4 迁移）：工具调用与 env 缓冲均限频 500ms——
+  // （CMS 迁移）：工具调用与 env 缓冲均限频 500ms——
   // 渲染风暴时从"每次渲染 1 次工具调用 + 1 次 setEnv"降到 ≤2 次/秒，
   // 消除渲染闭包内 I/O 对 Operit 全量重绘的放大作用；关键事件日志能力保留。
   function _localMd(ms) {
@@ -484,7 +484,7 @@ loadingChatsState[1](false);
   var reqIdCounter = { data: 0, persona: 0, mem: 0 };
   function nextReqId(kind) { reqIdCounter[kind] = (reqIdCounter[kind] || 0) + 1; return reqIdCounter[kind]; }
 
-  // v2.2.3：loadData 防抖——高频操作（连续删除/勾选/切换）300ms 内合并为一次全量拉取，
+  // loadData 防抖——高频操作（连续删除/勾选/切换）300ms 内合并为一次全量拉取，
   // 避免每次操作都触发全量请求 + Operit 全量重绘（UI 卡顿根源：1 分钟 45+ 次渲染）
   var _loadDataTimer = null;
   var _loadDataPending = null;
@@ -507,7 +507,7 @@ loadingChatsState[1](false);
       var r = parseResult(raw);
       dbgUi('loadData', 'req#' + rid + ' 返回 success=' + (r && r.success) + ' extracted=' + (r && r.extracted ? (r.extracted.events.length + 'e/' + r.extracted.todos.length + 't/' + r.extracted.contacts.length + 'c/' + r.extracted.info.length + 'i') : '无'));
       if (r && r.success) {
-            // v2.1.3 P0-1：空壳响应守卫（实验实锤：新模块早期工具调用约 2/3 概率返回 success=true 但 extracted 为空）
+            // P0-1：空壳响应守卫（实验实锤：新模块早期工具调用约 2/3 概率返回 success=true 但 extracted 为空）
             // 空壳 + 已有数据 → 保留旧数据，绝不覆盖（白屏直接元凶）
             var _ext = r.extracted;
             var _isEmpty = !_ext || (
@@ -546,7 +546,7 @@ loadingChatsState[1](false);
             }
             dbgState('dataState', newData, dataState[0]);
             dataState[1](newData);
-            forceRenderTick(0); // v2.3.2b: 异步更新数据后强制渲染（否则需切 tab 才显示分析结果）
+            forceRenderTick(0); // 异步更新数据后强制渲染（否则需切 tab 才显示分析结果）
             if (r.injection) {
               // 竞态保护：用户刚保存过（3秒内），跳过 loadData 的旧值覆盖
               if (Date.now() - (lastInjectionSaveRef.current || 0) > 3000) {
@@ -583,10 +583,10 @@ loadingChatsState[1](false);
   async function loadScreenPersona() {
     var rid = nextReqId('persona');
     dbgUi('loadPersona', 'req#' + rid + ' 触发');
-    // v2.1.0：60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
+    // 60 秒内复用已确认角色，避免每次进入页面重复 list_characters（框架调度层开销大）
     var pC = personaCacheRef.current || {};
     if (pC.id && (Date.now() - (pC.ts || 0)) < 60000) {
-      // v2.2.4: 缓存命中路径 5 秒节流，连切角色页避免反复 setEnv/setState 开销
+      // 缓存命中路径 5 秒节流，连切角色页避免反复 setEnv/setState 开销
       var _hitNow = Date.now();
       if (personaHitAtRef.current && (_hitNow - personaHitAtRef.current) < 5000) return;
       personaHitAtRef.current = _hitNow;
@@ -612,14 +612,14 @@ loadingChatsState[1](false);
       var pResult = parseResult(pRaw);
       var chars = pResult && pResult.success && pResult.characters ? pResult.characters : [];
       dbgUi('loadPersona', 'req#' + rid + ' 返回 success=' + (pResult && pResult.success) + ' chars=' + chars.length);
-      // v2.1.3 P0-1：空壳响应守卫——chars=0 且已有非空 persona 时保留旧值（"未识别角色卡"直接元凶）
+      // P0-1：空壳响应守卫——chars=0 且已有非空 persona 时保留旧值（"未识别角色卡"直接元凶）
       if (!chars || chars.length === 0) {
         var _curSP0 = screenPersonaState[0];
         if (_curSP0 && _curSP0.id) {
           dbgUi('loadPersona', 'req#' + rid + ' chars=0 空壳：保留已有 persona id=' + _curSP0.id);
           return;
         }
-        // v2.1.5：无旧值场景——置空后自驱重试（不依赖 render，否则停在"正在读取"需手动重载/切 tab 才恢复）
+        // 无旧值场景——置空后自驱重试（不依赖 render，否则停在"正在读取"需手动重载/切 tab 才恢复）
         personaFailCountRef.current = (personaFailCountRef.current || 0) + 1;
         if (personaFailCountRef.current <= 5) {
           dbgUi('loadPersona', 'req#' + rid + ' chars=0 无旧值：自驱重试 ' + personaFailCountRef.current + '/5');
@@ -636,14 +636,14 @@ loadingChatsState[1](false);
         dbgUi('loadPersona', 'req#' + rid + ' 过期丢弃（当前#' + reqIdCounter.persona + '）');
         return;
       }
-      // v2.1.0：相同角色不重复 setState（防渲染死循环）
+      // 相同角色不重复 setState（防渲染死循环）
       var curSP = screenPersonaState[0];
       var np = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || '') };
       if (!curSP || curSP.id !== np.id || curSP.name !== np.name || curSP.type !== np.type) {
         dbgState('screenPersonaState', np, curSP);
         screenPersonaState[1](np);
       }
-      // v2.1.0：不再主动查询角色记忆——避免每次切回都覆盖用户的分类选择；
+      // 不再主动查询角色记忆——避免每次切回都覆盖用户的分类选择；
       // 角色页列表由 character 组件内部按当前分类自行加载
       personaFailCountRef.current = 0;
       personaCacheRef.current = { id: String(p.id || ''), name: String(p.name || ''), type: String(p.type || ''), ts: Date.now() };
@@ -652,7 +652,7 @@ loadingChatsState[1](false);
 
   var _loadMemTimer = null;
   var _loadMemPending = null;
-  // v2.3.1：loadMem 300ms 防抖——连续删除记忆时合并为一次全量刷新（同 loadData 模式）
+  // loadMem 300ms 防抖——连续删除记忆时合并为一次全量刷新（同 loadData 模式）
   async function loadKnowledgeMemories() {
     if (_loadMemTimer) return _loadMemPending;
     _loadMemPending = new Promise(function(__resolve) {
@@ -680,7 +680,7 @@ loadingChatsState[1](false);
       var result = parseResult(raw);
       dbgUi('loadMem', 'req#' + rid + ' 返回 success=' + (result && result.success) + ' memories=' + (result && result.memories ? result.memories.length : '无'));
       if (result && result.success) {
-        // v2.1.3 P0-1：空壳响应守卫——返回空数组且已有记忆时保留旧缓存（不覆盖）
+        // P0-1：空壳响应守卫——返回空数组且已有记忆时保留旧缓存（不覆盖）
         var _mems = result.memories || [];
         var _oldM = memoryState[0];
         if (_mems.length === 0 && _oldM && _oldM.length > 0) {
@@ -703,12 +703,12 @@ loadingChatsState[1](false);
       dbgUi('loadMem', 'req#' + rid + ' 异常 ' + (fmtErr(e.message || String(e))));
       setResultText('记忆读取失败：' + (fmtErr(e.message || String(e))));
     }
-    // v2.1.4 P0-2：成功才写时间戳（空壳且无缓存时置 0，与 data 同款自动重试闭环）
+    // P0-2：成功才写时间戳（空壳且无缓存时置 0，与 data 同款自动重试闭环）
     var _memsOk = result && result.success && (result.memories || []).length > 0;
     var _cacheOk = memoryState[0] && memoryState[0].length > 0;
     memoryLoadedState[1]((_memsOk || _cacheOk) ? Date.now() : 0);
     memoryLoadingState[1](false);
-    // v2.1.5：空壳且无缓存时自驱重试（不依赖 render，避免冻结在"正在读取"）
+    // 空壳且无缓存时自驱重试（不依赖 render，避免冻结在"正在读取"）
     if (!_memsOk && !_cacheOk) {
       memoryFailCountRef.current = (memoryFailCountRef.current || 0) + 1;
       if (memoryFailCountRef.current <= 5) {
@@ -901,7 +901,7 @@ loadingChatsState[1](false);
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     }, 120000);
     try {
-      // v2.1.0：先查 characters 表拿当前角色（worker 跨进程可靠通道）；
+      // 先查 characters 表拿当前角色（worker 跨进程可靠通道）；
       // env 只做兜底（UI 的 ctx.getEnv 可能读不到 main.js setEnv 的跨进程值）
       var actId = '';
       var actName = '';
@@ -929,10 +929,10 @@ loadingChatsState[1](false);
       } else {
         setResultText(fmtErr((r && r.message) || '❌ 分析失败'));
       }
-      // v2.1.0：分析结束（成功/失败）标记全局时间戳，角色页下次进入强制刷新最新数据
+      // 分析结束（成功/失败）标记全局时间戳，角色页下次进入强制刷新最新数据
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     } catch (e) {
-      // v2.1.0：Operit 工具调用约 12 秒超时，但 worker 后台仍在分析（可达 80 秒）
+      // Operit 工具调用约 12 秒超时，但 worker 后台仍在分析（可达 80 秒）
       setResultText('分析请求超时，后台仍在进行（约30-80秒），请稍后刷新角色页查看');
       try { if (typeof globalThis !== 'undefined') globalThis.__cmeAnalyzeStamp = Date.now(); } catch (e) {}
     }
@@ -941,10 +941,10 @@ loadingChatsState[1](false);
   }
   async function deleteItem(category, idOrIndex) {
     try {
-      // v2.3.0：前端统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
+      // 前端统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
       var raw = await serialCall('memory_engine:delete_life_item', { category: category, id: idOrIndex });
       var r = parseResult(raw);
-      // v2.3.1：成功或失败都先本地移除该行——连点不再命中过期行；loadData 后台刷新兜底（300ms 防抖已覆盖）
+      // 成功或失败都先本地移除该行——连点不再命中过期行；loadData 后台刷新兜底（300ms 防抖已覆盖）
       dropLifeItemFromData(category, idOrIndex);
       if (r && r.success) {
         await loadData();
@@ -959,7 +959,7 @@ loadingChatsState[1](false);
     }
   }
 
-  // v2.3.1：本地移除六类数据中的指定 id（成功/失败通用——失败说明行已过期，移除避免重复点击）
+  // 本地移除六类数据中的指定 id（成功/失败通用——失败说明行已过期，移除避免重复点击）
   function dropLifeItemFromData(category, idOrIndex) {
     var cur = dataState[0];
     if (!cur) return;
@@ -979,7 +979,7 @@ loadingChatsState[1](false);
     try {
       var raw = await serialCall('memory_engine:delete_memory', { id: memoryId });
       var r = parseResult(raw);
-      // v2.3.1：成功或失败都先本地移除该条（按 id）——连点不再命中过期行；loadMem 防抖刷新兜底
+      // 成功或失败都先本地移除该条（按 id）——连点不再命中过期行；loadMem 防抖刷新兜底
       dropMemoryFromCache(memoryId);
       if (r && r.success) {
         await loadKnowledgeMemories();
@@ -999,7 +999,7 @@ loadingChatsState[1](false);
       }
     }
   }
-  // v2.3.1：按 id 优先移除（title 兜底）——调用方传 id，原实现按 title 比较删不掉
+  // 按 id 优先移除（title 兜底）——调用方传 id，原实现按 title 比较删不掉
   function dropMemoryFromCache(memoryId) {
     var cur = memoryState[0] || [];
     var sid = String(memoryId);
@@ -1056,7 +1056,7 @@ uiSaveRef.current = __uiSnapshot;
 // 主路径：ctx.setEnv 同步写入；下次进入 getEnv 同步读取，无需异步等待
 // 这是 msg_watcher 的 CACHED_ALL_DATA 同款模式
 try { ctx.setEnv('MEMORY_ENGINE_UI_STATE', __uiSnapshot); } catch(__eSet) {}
-// 兜底：异步触发工具保存到磁盘，保证重启后也能恢复（v2.3.1：防抖 500ms，渲染风暴时不放大 I/O）
+// 兜底：异步触发工具保存到磁盘，保证重启后也能恢复（防抖 500ms，渲染风暴时不放大 I/O）
 if (!_uiSaveTimer) {
 _uiSaveTimer = setTimeout(function() {
 _uiSaveTimer = null;
@@ -1230,7 +1230,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams2);
   var typeFilters = [];
   function makeFilterChip(label, value) {
     var isActive = filterType === value;
-    // v1.8.5：FilterChip 白框改实色按钮（选中 primary 实底白字粗体，未选中 surfaceContainerHigh 浅底）
+    // FilterChip 白框改实色按钮（选中 primary 实底白字粗体，未选中 surfaceContainerHigh 浅底）
     typeFilters.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: isActive ? colors.primary : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() { filterTypeState[1](isActive ? '' : value); } }, [
       UI.Text({ text: label, style: 'labelSmall', color: isActive ? colors.onPrimary : colors.onSurfaceVariant, fontWeight: 'bold' }),
     ]));
@@ -1399,7 +1399,7 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams2);
     case 6: tabContent = deployTab.render(ctx); break;
     default: tabContent = overviewTab.render(ctx, allData, { onOpenTodos: function() { tabState[1](1); } });
   }
-  // v2.1.0：数据型 tab 未就绪时显示加载占位，避免快速切换出现空白
+  // 数据型 tab 未就绪时显示加载占位，避免快速切换出现空白
   var dts0 = Number(dataLoadedState[0] || 0);
   var dd0 = dataState[0];
   var dataReady0 = dd0 && (dd0.events || dd0.info || dd0.todos || dd0.contacts || dd0.finance);
@@ -1416,14 +1416,14 @@ Operit.NativeInterface.callTool('memory_engine', 'save_ui_state', __uiParams2);
 
   // ===== 返回 =====
   return UI.Column({ fillMaxSize: true, padding: 8, onLoad: async function() {
-    // v2.1.6：action 链保持——Operit 平台异步 setState 默认不触发 UI 重建，
+    // action 链保持——Operit 平台异步 setState 默认不触发 UI 重建，
     // 只有 action 分发期间（Promise pending）订阅 stateChange 并通过中间渲染实时推送。
     // onLoad 本身是 action：await 关键加载 + 保持窗口，让本帧所有异步 setState 落在订阅窗口内。
     if (!dataLoadScheduledRef.current && !Number(dataLoadedState[0] || 0)) {
       try { await loadData(); } catch (__e) {}
     }
     // 保持 action 链窗口：覆盖 render 调度块触发的 persona/memory/角色页等异步加载的 setState 推送
-    // v2.3.2b：延长到 120s——onLoad 是 action 分发，期间订阅 stateChange → 任何 setState（含
+    // 延长到 120s——onLoad 是 action 分发，期间订阅 stateChange → 任何 setState（含
     // 自动分析 setTimeout 链）都会触发中间渲染推送平台重绘（源码级机制；dispatch 自调不可达平台，
     // 19:45 实证 sendIntermediateResult 未注入）。120s 覆盖自动分析周期，结束后窗口自动关闭。
     await new Promise(function(__res) { setTimeout(__res, 120000); });

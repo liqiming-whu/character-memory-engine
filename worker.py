@@ -89,7 +89,7 @@ if not MODEL_DIR or not os.path.exists(MODEL_DIR):
 # 向量去重阈值（方案 A）：余弦 ≥ 0.9 判重复
 VEC_DEDUP_THRESHOLD = 0.9
 
-# 项目 venv（v2.3.2）：依赖只装进 worker 脚本所在目录下的 .venv（正式运行于
+# 项目 venv：依赖只装进 worker 脚本所在目录下的 .venv（正式运行于
 # /root/character_memory_engine），绝不写入系统 python（不使用 --break-system-packages）。
 # 创建方式：python3 -m venv（系统 python 仅用于创建 venv，不安装任何包）。
 VENV_DIR = os.path.join(_SCRIPT_DIR, ".venv")
@@ -1052,7 +1052,7 @@ def deploy_status(conn, params):
     """检查部署状态：进程/重复/依赖/模型/venv/db/端口。"""
     import importlib.metadata as md
     status = {}
-    # venv：项目 venv 优先（v2.3.2 起依赖只装 .venv），其次报告当前解释器
+    # venv：项目 venv 优先（依赖只装 .venv），其次报告当前解释器
     if os.path.exists(VENV_PY):
         status["venv_ok"] = True
         status["venv_path"] = VENV_DIR
@@ -1089,8 +1089,7 @@ def deploy_status(conn, params):
 
 def deploy_install(conn, params):
     """安装缺失依赖（onnxruntime / sqlite-vec / tokenizers）到项目 venv。
-
-    v2.3.2 起：依赖只装进 worker 运行目录下的 .venv（python3 -m venv 创建），
+    自该版本起：依赖只装进 worker 运行目录下的 .venv（python3 -m venv 创建），
     不再写入系统 python（不使用 --break-system-packages）；系统 python 仅用于
     创建 venv 本身。安装完成后若当前 worker 仍跑在旧解释器，需重启 Worker 生效。
     """
@@ -1509,7 +1508,7 @@ def import_legacy_backup(conn, params):
             for item in rows:
                 # 前端字段直接作为 create_memory 参数（worker 做字段映射 + 去重）
                 p = dict(item)
-                # v1.8.5：旧备份子标题存在 category 字段（如"凭证""用户习惯"），
+                # 旧备份子标题存在 category 字段（如"凭证""用户习惯"），
                 # 覆盖大类前先保留为 title，避免导入后信息栏丢失分类标题
                 if p.get("category") and p["category"] != cat and not p.get("title"):
                     p["title"] = p["category"]

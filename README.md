@@ -52,23 +52,41 @@ Worker 启动：
 nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_engine/worker.py \
   --port 8765 --db /root/character_memory_engine/engine.db &
 ```
-> v2.3.2 起依赖只装进**项目 venv**（`/root/character_memory_engine/.venv`，由「安装依赖」按钮经 `python3 -m venv` 创建），不再写入系统 python。
+> 依赖只装进**项目 venv**（`/root/character_memory_engine/.venv`，由「安装依赖」按钮经 `python3 -m venv` 创建），不再写入系统 python。
+
+### 已知问题与解决方案
+
+#### 1. 首次或重启 Operit 后进入插件，worker 拉起时会卡顿
+- **现象**：Operit 刚启动（或重启后）首次进入插件界面，可能出现短暂卡顿 / 加载转圈 / 工具调用延迟。
+- **原因**：worker 是常驻进程（proot Ubuntu 内），Operit 重启后需要重新拉起；`onAppCreate` 延迟 10s 后自动提交启动脚本（`start_worker.sh` 后台执行，加载模型约数秒），期间进入插件触发的工具调用会先走 `health 先检 → 租约单飞 → 轻提交 → 轮询就绪` 链路，首次拉起耗时为模型加载时间，UI 表现为卡顿。
+- **解决方案**：
+  1. **正常等待即可**：worker 拉起是自愈的，`pollWorkerReady` 最多轮询 45s，就绪后后续调用秒回；首次进入卡顿是单次性的，之后进入均直连常驻 worker。
+  2. **避免启动后立刻进入**：重启 Operit 后等 10~15s 再打开插件，通常已自动拉起完成（`onAppCreate` 路径）。
+  3. 若卡顿超过 45s 且提示「worker 45s 内未就绪」，按下方问题 2 排查坏会话。
+
+#### 2. 坏会话导致 worker 拉起失败
+- **现象**：Operit 重启后偶发首次 `hiddenExec` 提交挂起（20s+），worker 无法拉起，工具报 `TERMINAL_CHANNEL_UNAVAILABLE` 或一直转圈。
+- **原因**：Operit 重启早期 terminal executor 会话存在竞态，可能创建**坏会话**（残留跨启动）；坏会话上的命令永久挂起，导致提交/探测卡死（11 轮实验实锤：卡死 4/4 全残留、正常 7/7 无残留）。
+- **解决方案**：
+  1. **打开一次终端页面**：手动打开 Operit 终端（触发会话重建/清理），再重试进入插件——`freshKey` 会自动漂移全新会话，坏会话绝不复用。
+  2. **重启 Operit**：`onAppCreate` 会清除熔断标记并重新拉起。
+  3. **自动熔断保护**：代码已内置会话级熔断（首次提交超时 → 写 `channel_broken.json` 60s 冷却 → 本次 App 实例内不再重复提交，避免坏通道上排队堆积），冷却期后自动允许重试一次，无需手动干预。
 
 ### 已知限制与运维
-- **自动拉起 Worker（v2.0.20+）**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 30s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。
+- **自动拉起 Worker**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 10s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。
 - **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话；每次拉起强制 `freshKey` 全新会话，坏会话绝不复用。
 - **部署状态自检**：`deploy_status` 走 `/proc` 遍历（不依赖 pgrep，proot/Termux 通用）。
 - **调试广播**（需 `--user 0`）：
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_REFRESH_PACKAGES --ez reactivate_active_packages true`
 
-## 当前版本（v2.1.7）：初始化竞态修复
+## 当前版本：初始化竞态修复
 
 **修复目标**：Operit 前端"JS 模块重载 + 工具调用初始化竞态"导致的**空加载（白屏）/ 卡"正在读取" / "未识别角色卡"** 三类问题。
 
 **两层竞态**：
-1. **第一层（v2.0.20 已解决）**：Operit 重启早期 hiddenExec executor 会话竞态 → `onAppCreate` 延迟 30s + `ensureWorkerUp` freshKey 自愈
-2. **第二层（v2.1.3~v2.1.7 已解决）**：每次进入插件界面重新执行整个 JS 模块 + 新模块早期工具调用约 2/3 概率返回"成功但空壳" + useState key 部分持久化失效 + 空壳覆盖已有数据 + 并发乱序
+1. **第一层（已解决）**：Operit 重启早期 hiddenExec executor 会话竞态 → `onAppCreate` 延迟 10s + `ensureWorkerUp` freshKey 自愈
+2. **第二层（已解决）**：每次进入插件界面重新执行整个 JS 模块 + 新模块早期工具调用约 2/3 概率返回"成功但空壳" + useState key 部分持久化失效 + 空壳覆盖已有数据 + 并发乱序
 
 **已实施修复（按版本）**：
 - v2.1.3 空壳响应守卫（data / persona / memory 三处，空结果绝不覆盖非空状态）
@@ -89,8 +107,8 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
 - BGE-small-zh int8（23.9MB，512 维）
 - 语义相似度：奶茶 vs 爱喝奶茶 = 0.95，奶茶 vs 健身房 = 0.47
 - 方案 A 8 项全 PASS、方案 B 22 项全 PASS、旧备份导入幂等 PASS
-- **自动拉起（v2.0.17）**：重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）
-- **AI 自动提取四类角色记忆（v2.1.0）**：worker `analyze_chat` 调 DeepSeek 自动提取角色信息/关系/偏好/互动规则，四类 8 条验证落库
+- **自动拉起**：重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）
+- **AI 自动提取四类角色记忆**：worker `analyze_chat` 调 DeepSeek 自动提取角色信息/关系/偏好/互动规则，四类 8 条验证落库
 详见 [docs/TECH_VALIDATION.md](docs/TECH_VALIDATION.md)。
 
 ### 性能实测（v2.1.0，无瓶颈）

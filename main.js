@@ -15,12 +15,12 @@ var index_ui_js_1 = __importDefault(require("./ui/memory_system_ui/screen.js"));
 // 数据按 DATA_DIR 规范落到 /sdcard/Download/Operit/character_memory_engine。
 var WORKER_PORT = 8765;
 var TRIGGER_FILE = '/sdcard/Download/Operit/character_memory_engine/trigger.json';
-// v2.1.0：上次已保存的角色卡 id（变化才写 characters 表）
+// 上次已保存的角色卡 id（变化才写 characters 表）
 var lastSavedCardId = '';
 var COOLDOWN_MS = 20 * 60 * 1000; // 连续静默 20 分钟后结算旧对话
 var AUTO_ANALYZE_ENABLED = true; // 自动分析开关
 
-// ===== v2.3.4 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
+// ===== 冷启动探针：T0-T8 时间戳（单调时钟+UTC墙钟），写入 cold_probe.log =====
 function cmeProbe(tag, extra) {
   try {
     var mono = 0;
@@ -32,7 +32,7 @@ function cmeProbe(tag, extra) {
 }
 
 // 写日志：追加到 engine.log（Tools.Files.write 支持 append=true）
-// v2.3.1：时间戳跟随系统本地时区（原 toISOString 固定 UTC，排查需换算）
+// 时间戳跟随系统本地时区（原 toISOString 固定 UTC，排查需换算）
 function _localTs() {
   var d = new Date();
   function p(n) { return (n < 10 ? '0' : '') + n; }
@@ -55,8 +55,7 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
-// hiddenExec 会话策略（v1.0.6+多轮实测）：
-// 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
+// hiddenExec 会话策略（多轮实测）: // 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
 // 2. 方案：key 持久化到文件（跨模块重载有效）+ 失败自动漂移新 key（自愈），正常时固定 1 个会话零膨胀
 var KEY_FILE = '/sdcard/Download/Operit/character_memory_engine/logs/exec_key';
 function getKey() {
@@ -72,7 +71,7 @@ function withRace(p, ms, msg) {
       function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
   });
 }
-// v2.4.1：补齐 withTimeout（与 memory_engine.js 同实现）。修复 onAppCreate 路径
+// 补齐 withTimeout（与 memory_engine.js 同实现）。修复 onAppCreate 路径
 // ensureWorkerUp/pollWorkerReady 引用未定义函数 → health 误判失败 + 提交必失败（2026-08-09 实测暴露）
 function withTimeout(promise, ms, message) {
   var timer;
@@ -190,12 +189,12 @@ var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
 var ROOT_DIR = '/root/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
-// ===== v2.4.3：会话级熔断（ChatGPT 2026-08-09 建议）=====
+// ===== 会话级熔断（ChatGPT 2026-08-09 建议）=====
 // 根因：Operit 重启后 terminal 会话偶发跨启动残留 → 首次 hiddenExec 提交挂起 20s → UI 卡死闪退（11 轮实验实锤）
 // 熔断：首次提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交（onAppCreate/UI 双入口共享）
 // 恢复：onAppCreate 启动时清除（App 实例重建即恢复）；60s 冷却过期自动允许重试一次；用户打开终端页面后重试
 // 通道：文件（memory_engine.js 工具脚本环境无 setEnv，统一文件通道）
-// v2.4.5：内存标志兜底——第 17 轮实锤「JS 文件写入早期不可用」导致首败后熔断不生效（10 次提交风暴 ~1min）；
+// 内存标志兜底——第 17 轮实锤「JS 文件写入早期不可用」导致首败后熔断不生效（10 次提交风暴 ~1min）；
 // 改为内存优先 + 文件 best-effort：文件写失败时本 VM 内后续提交仍立即熔断（App 重启 VM 重建，内存自动归零，语义不变）
 var _memBrokenAt = 0;
 var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
@@ -246,7 +245,7 @@ async function httpCall(action, payload) {
   }
 }
 
-// v2.3.2b：detectPython 不再做任何 JS 侧文件探测——
+// detectPython 不再做任何 JS 侧文件探测——
 // ① hiddenExec 探测会卡 8s×N（32s 阻塞 → ANR/闪退，2026-08-08 实锤）；
 // ② Tools.Files.exists(...,'linux') 在当前 Operit 版本不可靠（实测返回空对象，误报 python3 不存在）。
 // python 路径由 deploy_install 固定创建（项目 venv），存在性校验下沉到启动脚本 bash [ -x ]（毫秒级）。
@@ -297,7 +296,7 @@ async function ensureWorkerUp() {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
-  // v2.4.3：会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
+  // 会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
   if (isChannelBroken()) {
     return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请打开一次终端页面后重试，或重新启动 Operit。' };
   }
@@ -329,11 +328,11 @@ async function ensureWorkerUp() {
   try {
     freshKey();
     var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    // v2.4.3：提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
+    // 提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
     await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
   } catch (e) {
     try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    // v2.4.3：BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
+    // BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
     try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
     setChannelBroken();
     return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面手动清理会话后重试，或重新启动 Operit。' };
@@ -356,14 +355,14 @@ async function pollWorkerReady(launchId, src) {
       return { success: true, started: true, launchId: launchId };
     }
   }
-  // 超时：释放租约 + 保护窗口（v2.4.3：30s→60s，避免坏通道上过快重试堆积），允许下次重试
+  // 超时：释放租约 + 保护窗口（30s→60s，避免坏通道上过快重试堆积），允许下次重试
   try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
   try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
   return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
-// ===== v2.2.0 记忆注入：按官方额外信息注入插件（message_insert）模式实现 =====
+// ===== 记忆注入：按官方额外信息注入插件（message_insert）模式实现 =====
 // before_send_to_model 阶段召回当前角色记忆，构造 <attachment> 附加到消息返回。
 var MEMORY_INJECTION_ATTACHMENT_PREFIX = 'cme_memory_bundle_';
 async function readInjectionSettings() {
@@ -477,8 +476,7 @@ async function injectMemoryAttachment(processedInput, callerCardId, chatId) {
     return null;
   }
 }
-// v2.2.1：注入内容随消息保存（对齐官方 persistInjectedContent）：
-// persist=true → before_process 阶段把注入内容直接拼进消息文本（随消息落库，不走附件）；
+// 注入内容随消息保存（对齐官方 persistInjectedContent）: // persist=true → before_process 阶段把注入内容直接拼进消息文本（随消息落库，不走附件）；
 // persist=false → 不在此处处理，由 onPromptFinalize 以附件形式临时注入（只给模型看不落库）。
 async function onPromptInput(input) {
   var evt = (input && input.eventPayload) || {};
@@ -502,7 +500,7 @@ async function onPromptInput(input) {
     return null;
   }
 }
-// ===== v2.3.1：trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
+// ===== trigger.json 原子读写（防并发半写损坏导致水位线丢失）=====
 async function writeTriggerAtomicMain(obj) {
   var tmp = TRIGGER_FILE + '.tmp';
   try {
@@ -539,7 +537,7 @@ async function onPromptFinalize(input) {
     var callerCardId = (activePrompt && activePrompt.type === 'character_card') ? String(activePrompt.id || '') : '';
     var personaName = (activePrompt && activePrompt.name) ? String(activePrompt.name || '') : '';
 
-    // v2.1.0：自动保存当前角色卡到 characters 表（角色页依赖它识别；变化时才写）
+    // 自动保存当前角色卡到 characters 表（角色页依赖它识别；变化时才写）
     if (callerCardId) {
       try {
         setEnv('MEMORY_ENGINE_ACTIVE_PERSONA_ID', callerCardId);
@@ -568,7 +566,7 @@ async function onPromptFinalize(input) {
       jsLog('DEBUG', 'onPromptFinalize: 读 trigger 失败: ' + (e.message || String(e)));
     }
 
-    // v2.3.1：写前合并保留水位线等字段（旧逻辑整写会清空 watermarks/lastAnalyzedAt，导致每次重复全量分析）
+    // 写前合并保留水位线等字段（旧逻辑整写会清空 watermarks/lastAnalyzedAt，导致每次重复全量分析）
     var nextTrigger = { chatId: currentChatId, cooldownStart: now, callerCardId: callerCardId, personaName: personaName };
     if (trigger) {
       if (trigger.watermarks) nextTrigger.watermarks = trigger.watermarks;
@@ -580,7 +578,7 @@ async function onPromptFinalize(input) {
       if (trigger.lastCheckedChatId) nextTrigger.lastCheckedChatId = trigger.lastCheckedChatId;
     }
     if (!triggerReadOk && !triggerMissing) {
-      // v2.3.1：trigger.json 读取异常（并发半写/损坏）→ 跳过本次更新，保留旧文件与水位线
+      // trigger.json 读取异常（并发半写/损坏）→ 跳过本次更新，保留旧文件与水位线
       jsLog('WARN', 'onPromptFinalize: trigger.json 读取异常，本次跳过更新（避免清空水位线）');
     } else if (!trigger) {
       try {
@@ -588,7 +586,7 @@ async function onPromptFinalize(input) {
       } catch (e) {
         jsLog('DEBUG', 'onPromptFinalize: 写 trigger 失败: ' + (e.message || String(e)));
       }
-      // v2.1.0：首次识别到角色卡立即分析一次（不等 20 分钟冷却），让角色页尽快有数据
+      // 首次识别到角色卡立即分析一次（不等 20 分钟冷却），让角色页尽快有数据
       if (callerCardId) {
         autoAnalyzeChat(currentChatId, callerCardId, personaName).catch(function() {});
       }
@@ -596,7 +594,7 @@ async function onPromptFinalize(input) {
       var cooldownPassed = (now - (trigger.cooldownStart || now)) >= COOLDOWN_MS;
       var processChatId = trigger.chatId || currentChatId;
       var chatIdChanged = trigger.chatId && trigger.chatId !== currentChatId;
-      // v2.1.0：角色卡变化也立即分析（切换角色后快速建立该角色的记忆）
+      // 角色卡变化也立即分析（切换角色后快速建立该角色的记忆）
       var cardChanged = !!callerCardId && (trigger.callerCardId || '') !== callerCardId;
       if (cooldownPassed || chatIdChanged || cardChanged) {
         jsLog('INFO', 'onPromptFinalize: 触发自动分析 chatId=' + processChatId + ' cooldownPassed=' + cooldownPassed + ' chatChanged=' + chatIdChanged + ' cardChanged=' + cardChanged);
@@ -608,8 +606,8 @@ async function onPromptFinalize(input) {
         jsLog('DEBUG', 'onPromptFinalize: 更新 trigger 失败: ' + (e.message || String(e)));
       }
     }
-    // v2.2.0：记忆注入（官方额外信息注入插件模式）——召回当前角色记忆附加到消息
-    // v2.2.1：persist=true 时注入内容已在 onPromptInput（before_process）阶段拼进消息文本，
+    // 记忆注入（官方额外信息注入插件模式）——召回当前角色记忆附加到消息
+    // persist=true 时注入内容已在 onPromptInput（before_process）阶段拼进消息文本，
     // 此处跳过附件注入避免双份；persist=false 时保持附件注入（只给模型看不落库）
     try {
       var processedInput = String(evt.processedInput ?? evt.rawInput ?? "").trim();
@@ -638,7 +636,7 @@ async function onPromptFinalize(input) {
 function onAppCreate() {
     try {
         cmeProbe('T0');
-        // v2.4.5：冷却期尊重（ChatGPT 评估后升级为第一优先）——
+        // 冷却期尊重（ChatGPT 评估后升级为第一优先）——
         // 上次失败留下的 broken 在冷却期内继续生效：跳过自动拉起，避免启动阶段主动制造更多会话压力
         //（第 21/22/23 轮实锤「提交 = 会话制造」，启动早期提交会提高 Terminal Manager 恢复失败概率）
         // 冷却过期后由 UI 路径自动重试（isChannelBroken 过期即清除，语义不变）
@@ -646,7 +644,7 @@ function onAppCreate() {
             jsLog('INFO', 'onAppCreate: 通道冷却期内（上次启动失败），跳过自动拉起，等待冷却过期后 UI 路径重试');
             return;
         }
-        // v2.4.3：新 App 实例启动 → 清除上次会话级熔断（避免异常状态污染本次正常启动）
+        // 新 App 实例启动 → 清除上次会话级熔断（避免异常状态污染本次正常启动）
         clearChannelBroken();
         // v2.4 实验开关：DISABLE_APP_CREATE_LAUNCH=1 时禁用 onAppCreate 自动拉起（归因实验用）
         var _disable = '';
@@ -657,7 +655,7 @@ function onAppCreate() {
         }
         setTimeout(function () {
             (async function () {
-                // v2.1.0：先强制部署最新 worker.py 到 /root（覆盖旧版残留）
+                // 先强制部署最新 worker.py 到 /root（覆盖旧版残留）
                 try { await deployWorkerToData(); } catch (e) {}
                 // 版本检查：文件 VERSION 与运行中进程不一致则 kill，下次调用自动拉起新版
                 try {
@@ -718,7 +716,7 @@ function registerToolPkg() {
         id: "memory_engine_prompt_finalize",
         function: onPromptFinalize
     });
-    // v2.2.1：注入内容随消息保存（persist=true 时 before_process 文本拼接注入）
+    // 注入内容随消息保存（persist=true 时 before_process 文本拼接注入）
     ToolPkg.registerPromptInputHook({
         id: "memory_engine_prompt_input",
         function: onPromptInput

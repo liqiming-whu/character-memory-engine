@@ -1,5 +1,23 @@
 # Character Memory Engine 开发计划
 
+## v2.4.7 战役：ping_js 探针注册修复 + 代码过时版本号清理（2026-08-09）
+
+### ping_js 探针注册修复
+- **背景**：v2.4.2 加入的诊断探针 ping_js 调用报 `Tool not found`（挂账「注册待查」）。根因：Operit subpackage 解析器按 METADATA `tools` 数组注册工具，而 ping_js 只有 `exports` 导出、漏加 METADATA 声明 → 工具注册表不识别（METADATA 工具数 30 vs exports 31，数量对不上）
+- **修复**：`packages/memory_engine.js` METADATA `tools` 补 `ping_js` 声明（含 q 参数），置于 ping_worker 之前
+- **验证**：node --check 通过；METADATA 工具数 31 = exports 数 31 对齐；烧录后平台 `memory_engine` 子包 toolCount 30→31；**重启 Operit 后实机调用 `memory_engine:ping_js` 返回 `{"pong":true,"ts":...,"mono":...}` PASS**
+- **经验**：Operit subpackage 工具注册以 METADATA 声明的工具名为准（非扫描 exports）；新增工具必须同步补 METADATA，否则 Tool not found
+
+### 代码过时版本号清理（用户要求：删除代码中过时的版本号，版本校验不检查代码）
+- **范围**：main.js / packages/memory_engine.js / worker.py / screen.js / character.js / knowledge.js / todos.js 注释中历史版本号标记（vX.Y.Z 及括号引用），共清理 145 行
+- **保留**：运行时版本逻辑（worker.py `VERSION = "2.1.9"`、main.js 文件 VERSION 与运行进程比对热更新检查、ping_worker 返回 version）——这是热更新机制，不是过时注释
+- **验证**：node --check 7 文件 + py_compile 全过；运行时 VERSION 逻辑 grep 确认完整保留
+
+### README 已知问题补充
+- 新增「已知问题与解决方案」小节：① 首次/重启后进入插件 worker 拉起卡顿（原因 + 3 条解决方案）；② 坏会话导致 worker 拉起失败（原因 + 3 条解决方案）
+
+---
+
 ## v2.3.2 战役：ANR 闪退修复（32s 探测阻塞）+ 项目 venv 改造（2026-08-08 晚）
 
 ### 背景与现象

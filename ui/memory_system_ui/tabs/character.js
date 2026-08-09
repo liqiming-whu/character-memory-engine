@@ -12,9 +12,9 @@ const CATEGORIES = [
   { id: 'interaction_rule', label: '互动规则' },
 ];
 
-// v2.2.2：删除按钮改为"两段式确认"（第一次点击变确认态，第二次执行），
+// 删除按钮改为"两段式确认"（第一次点击变确认态，第二次执行），
 // 天然防渲染器双触发与连点，不再需要防重入锁
-// v2.1.3：模块级"本地变更权威快照"——删除/创建成功后记录最新列表与时间戳；
+// 模块级"本地变更权威快照"——删除/创建成功后记录最新列表与时间戳；
 // 每次渲染强制应用（任何异步路径覆盖列表都会被拉回），30 秒后过期恢复正常加载。
 // 模块级变量跨渲染/跨闭包绝对共享，不依赖 useState/useRef 的可靠性。
 var __cmeLocalList = null;
@@ -38,10 +38,10 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   var personaName = String((personaState[0] && personaState[0].name) || '');
   var personaType = String((personaState[0] && personaState[0].type) || '');
   var memoriesState = ctx.useState('character_memories', []);
-  // v2.1.1：记录最近一次接受的 screen 快照签名——本地变更（删除/创建）后 screen 重渲染仍会传旧快照，
+  // 记录最近一次接受的 screen 快照签名——本地变更（删除/创建）后 screen 重渲染仍会传旧快照，
   // 只有快照内容变化（screen 重新拉取）才接受，避免"删了又回来"需要点两次
   var lastScreenMemRef = ctx.useRef('character_last_screen_mem_sig', '');
-  // v2.1.1：screen 快照只接受角色四分类（character/relationship/preference/interaction_rule），
+  // screen 快照只接受角色四分类（character/relationship/preference/interaction_rule），
   // 防止 info 等知识分类记忆（未选分类误存）混入角色页
   var screenRoleSet = ['character', 'relationship', 'preference', 'interaction_rule'];
   var screenFiltered = (Array.isArray(memoriesFromScreen) && memoriesFromScreen.length > 0)
@@ -50,9 +50,9 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   if (screenFiltered.length > 0) {
     var sig = JSON.stringify(screenFiltered);
     var curM0 = memoriesState[0] || [];
-    // v2.1.2：本地变更（删除/创建）后 30 秒内不接受 screen 快照覆盖——本地列表为准，
+    // 本地变更（删除/创建）后 30 秒内不接受 screen 快照覆盖——本地列表为准，
     // 防止删除/添加后重渲染时 screen 旧快照把已删记忆"救回来"（表现为要点两次）
-    // v2.1.4：用 useState 时间戳（跨 mount 持久，模块级变量 mount 后重置会失效）
+    // 用 useState 时间戳（跨 mount 持久，模块级变量 mount 后重置会失效）
     var localFresh = localChangeState[0] && (Date.now() - localChangeState[0]) < 30000;
     if (!localFresh && sig !== lastScreenMemRef.current) {
       lastScreenMemRef.current = sig;
@@ -63,29 +63,29 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   }
   var loadingState = ctx.useState('character_loading', false);
   var loadedForRef = ctx.useRef('character_loaded_for', '');
-  // v2.1.0：全量四类缓存——chip 切换前端过滤，秒切零调用
+  // 全量四类缓存——chip 切换前端过滤，秒切零调用
   var allMemoriesRef = ctx.useRef('character_all_memories_v2', []);
-  // v2.1.0：复用 screen.js 的 persona 缓存（同 key 'personaCache'），onLoad 未完成时避免重复 list_characters
+  // 复用 screen.js 的 persona 缓存（同 key 'personaCache'），onLoad 未完成时避免重复 list_characters
   var personaCacheRef2 = ctx.useRef('personaCache', { id: '', name: '', type: '', ts: 0 });
   var lastAnalyzeSeenRef = ctx.useRef('character_last_analyze_seen', 0);
   var categoryState = ctx.useState('character_category_v2', '');
-  // v2.1.1：分类即时 ref——chips onClick 里先同步 ref 再 setState，
+  // 分类即时 ref——chips onClick 里先同步 ref 再 setState，
   // 防止"选完分类立刻点保存"时保存按钮闭包仍捕获旧分类（导致存成 info/通用记忆）
   var categoryStateRef = ctx.useRef('character_category_ref_v2', '');
-  // v2.1.1：本地变更时间戳（删除/创建成功时刷新）——用于抑制 screen 旧快照覆盖
+  // 本地变更时间戳（删除/创建成功时刷新）——用于抑制 screen 旧快照覆盖
   var localChangeRef = ctx.useRef('character_local_change_v2', 0);
-  // v2.1.2：本地变更时间戳（useState 版，跨渲染绝对可靠）——渲染风暴/异步等待期间，
+  // 本地变更时间戳（useState 版，跨渲染绝对可靠）——渲染风暴/异步等待期间，
   // useRef 读取可能拿到旧值导致保护失效；useState 与列表更新同机制，30 秒内禁止
   // loadOnEnter 自动加载与 screen 快照覆盖，列表完全由本地维护
   var localChangeState = ctx.useState('character_local_change_v3', 0);
-  // v2.1.4：已删记忆"墓碑"（useState 跨 mount 持久）——删除成功后记录 id，
+  // 已删记忆"墓碑"（useState 跨 mount 持久）——删除成功后记录 id，
   // 每次渲染强制从列表过滤；即使组件重新挂载（mount）后重新加载返回含已删记忆的
   // 旧列表，渲染时也会被墓碑过滤掉，60 秒后过期恢复正常同步
   var localOpsState = ctx.useState('character_local_ops_v1', '[]');
   var localOpsTsState = ctx.useState('character_local_ops_ts_v1', 0);
-  // v2.2.2：删除按钮两段式确认——第一次点击记录 pending（按钮变红显示确认态），第二次点击才执行删除
+  // 删除按钮两段式确认——第一次点击记录 pending（按钮变红显示确认态），第二次点击才执行删除
   var pendingDeleteState = ctx.useState('character_pending_delete_v1', '');
-  // v2.2.3：pending 权威判断用 useRef（不依赖渲染）——Operit 渲染器偶发不重绘时
+  // pending 权威判断用 useRef（不依赖渲染）——Operit 渲染器偶发不重绘时
   // onClick 闭包可能读到旧 state 导致确认态丢失（点第二次又被当第一次，看起来像卡住）；
   // ref.current 跨渲染即时更新，保证第二次点击一定执行删除
   var pendingDeleteRef = ctx.useRef('character_pending_delete_ref_v1', '');
@@ -102,7 +102,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       }
     }
   }
-  // v2.1.3：渲染时强制应用模块级本地快照——删除/创建后 30 秒内，无论其他路径
+  // 渲染时强制应用模块级本地快照——删除/创建后 30 秒内，无论其他路径
   // （异步加载/快照覆盖）把 memoriesState 改成了什么，渲染时都拉回权威列表
   if (__cmeLocalList && __cmeLocalTs && (Date.now() - __cmeLocalTs) < 30000) {
     var curSnap = memoriesState[0] || [];
@@ -136,12 +136,12 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       memoriesState[1]([]);
       return;
     }
-    // v2.1.0：silent（分类 chip 切换）不显示"正在读取"，列表直接更新，避免卡转圈
+    // silent（分类 chip 切换）不显示"正在读取"，列表直接更新，避免卡转圈
     if (!silent) loadingState[1](true);
     try {
-      // v2.1.0：全不选 = 一次查全部（前端过滤四类）+ 更新缓存；单分类 = 查该分类
+      // 全不选 = 一次查全部（前端过滤四类）+ 更新缓存；单分类 = 查该分类
       var cat = catOverride || categoryState[0] || '';
-      // v2.2.2：区分"查询成功但为空"与"查询失败"——空数据显示空态，不再误报读取失败
+      // 区分"查询成功但为空"与"查询失败"——空数据显示空态，不再误报读取失败
       var ok = false;
       if (!cat) {
         var rr = parseResult(await callToolWithTimeout('memory_engine:list_memories', { character_id: targetPersonaId, limit: 100 }, 12000));
@@ -155,7 +155,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
         merged = ok && rr2.memories ? rr2.memories : [];
       }
       if (ok) {
-        // v2.1.0：相同内容不重复 setState（防并发重复渲染）
+        // 相同内容不重复 setState（防并发重复渲染）
         var curM1 = memoriesState[0] || [];
         if (JSON.stringify(curM1) !== JSON.stringify(merged)) {
           memoriesState[1](merged);
@@ -166,7 +166,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
           resultState[1]('暂无角色记忆（0 条）');
         }
       } else {
-        // v2.1.0：查询失败/超时（Operit 工具调用层偶发波动）——不清空列表，5 秒后自动重试一次
+        // 查询失败/超时（Operit 工具调用层偶发波动）——不清空列表，5 秒后自动重试一次
         resultState[1]('读取失败：暂时无法读取，5 秒后自动重试…');
         retryAtRef.current = Date.now() + 5000;
         var pidR = personaState[0] && personaState[0].id;
@@ -186,17 +186,17 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
     }
   }
   async function loadContext() {
-    // v2.1.0：防重入锁带过期（20秒）——useRef 跨重启持久化，残留 true 会锁死加载
+    // 防重入锁带过期（20秒）——useRef 跨重启持久化，残留 true 会锁死加载
     if (contextLoadingRef.current && (Date.now() - contextLoadingRef.current) < 20000) return;
     contextLoadingRef.current = Date.now();
     try {
-      // v2.1.0：优先用 screen.js 传入的已确认角色（避免每次进入重复 list_characters 工具调用）
+      // 优先用 screen.js 传入的已确认角色（避免每次进入重复 list_characters 工具调用）
       var persona = null;
       if (personaFromScreen && personaFromScreen.id) {
         persona = { id: String(personaFromScreen.id), name: String(personaFromScreen.name || '未命名角色'), type: String(personaFromScreen.type || 'character_card') };
       }
       if (!persona) {
-        // v2.1.0：查 screen.js persona 缓存（60 秒内），onLoad 未完成时避免重复 list_characters
+        // 查 screen.js persona 缓存（60 秒内），onLoad 未完成时避免重复 list_characters
         var pc2 = personaCacheRef2.current || {};
         if (pc2.id && (Date.now() - (pc2.ts || 0)) < 60000) {
           persona = { id: String(pc2.id), name: String(pc2.name || '未命名角色'), type: String(pc2.type || 'character_card') };
@@ -225,7 +225,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
         retryAtRef.current = Date.now() + 30000;
         return;
       }
-      // v2.1.0：相同角色不重复 setState（防渲染死循环）
+      // 相同角色不重复 setState（防渲染死循环）
       var curP = personaState[0];
       if (!curP || curP.id !== persona.id || curP.name !== persona.name || curP.type !== persona.type) {
         personaState[1](persona);
@@ -233,7 +233,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       var nextId = String(persona.id || '');
       if (nextId) {
         retryAtRef.current = 0;
-        // v2.1.0：分析完成（全局时间戳）后强制刷新，避免切回角色页看到旧缓存
+        // 分析完成（全局时间戳）后强制刷新，避免切回角色页看到旧缓存
         try {
           var gStamp = (typeof globalThis !== 'undefined') ? (globalThis.__cmeAnalyzeStamp || 0) : 0;
           if (gStamp && gStamp > (lastAnalyzeSeenRef.current || 0)) {
@@ -241,7 +241,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
             loadedForRef.current = '';
           }
         } catch (e) {}
-        // v2.1.0：同一角色 30 秒内已加载过则不重复拉取（防 chip 重渲染闪屏）；
+        // 同一角色 30 秒内已加载过则不重复拉取（防 chip 重渲染闪屏）；
         // 超过 30 秒或跨重启（时间戳过期）则重新加载，避免显示旧数据/卡"正在读取"
         var lfInfo = loadedForRef.current || '';
         var lfId = lfInfo.split(':')[0];
@@ -260,7 +260,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       var errMsg = e.message || String(e);
       resultState[1]('角色上下文读取失败：' + errMsg);
       retryAtRef.current = Date.now() + 30000;
-      // v2.1.0：worker 未就绪/超时类错误，5 秒后自动重试一次，避免一直卡"正在读取"
+      // worker 未就绪/超时类错误，5 秒后自动重试一次，避免一直卡"正在读取"
       if (/worker|未响应|拉起|超时|未就绪/i.test(errMsg)) {
         resultState[1]('引擎启动中，5 秒后自动重试…');
         setTimeout(function() { if (!contextLoadingRef.current || (Date.now() - contextLoadingRef.current) >= 20000) loadContext(); }, 5000);
@@ -272,7 +272,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
 
   async function loadMemories() {
     loadedForRef.current = personaId + ':' + Date.now();
-    // v2.1.0：刷新 = 重新拉全量更新缓存，再按当前选中的分类过滤显示
+    // 刷新 = 重新拉全量更新缓存，再按当前选中的分类过滤显示
     await loadForPersona(personaId, '');
     var cat2 = categoryState[0];
     if (cat2) {
@@ -289,9 +289,9 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       resultState[1]('标题和内容不能为空');
       return;
     }
-    // v2.1.2：点击保存即进入本地变更保护（useState 跨渲染可靠）
+    // 点击保存即进入本地变更保护（useState 跨渲染可靠）
     localChangeState[1](Date.now());
-    // v2.1.1：优先即时 ref（chips 点击已同步），兜底当前渲染快照；
+    // 优先即时 ref（chips 点击已同步），兜底当前渲染快照；
     // 未选分类直接提示，不再默默存成 info/通用记忆（用户上次踩的坑）
     var category = categoryStateRef.current || categoryState[0] || '';
     if (!category) {
@@ -309,10 +309,10 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       titleState[1]('');
       contentState[1]('');
       resultState[1]('记忆创建成功' + (result.deduped ? '（合并已有记忆）' : ''));
-      // v2.1.1：本地立即插入/替换（平台工具缓存可能返回旧列表，不再依赖重新拉取）
+      // 本地立即插入/替换（平台工具缓存可能返回旧列表，不再依赖重新拉取）
       localChangeRef.current = Date.now();
       localChangeState[1](Date.now());
-      // v2.1.1：同步刷新 30 秒加载窗口，防止重渲染时 loadOnEnter 重新拉取覆盖本地新增
+      // 同步刷新 30 秒加载窗口，防止重渲染时 loadOnEnter 重新拉取覆盖本地新增
       loadedForRef.current = personaId + ':' + Date.now();
       var nm = result.memory;
       if (nm && nm.id) {
@@ -320,7 +320,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
         var idx = -1;
         for (var i = 0; i < curList.length; i++) { if (curList[i].id === nm.id) { idx = i; break; } }
         if (idx >= 0) curList[idx] = nm; else curList.unshift(nm);
-        // v2.1.3：写入模块级权威快照（渲染时强制应用）
+        // 写入模块级权威快照（渲染时强制应用）
         __cmeLocalList = curList;
         __cmeLocalTs = Date.now();
         memoriesState[1](curList);
@@ -340,10 +340,10 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   async function deleteMemory(mid) {
     var logLine = function(s) { try { ctx.callTool('memory_engine:log_ui', { line: s }); } catch (e) {} };
     logLine('[del] click id=' + mid + ' list=' + (memoriesState[0] || []).length);
-    // v2.1.2：点击即进入本地变更保护（useState 跨渲染可靠）——异步等待/渲染风暴期间
+    // 点击即进入本地变更保护（useState 跨渲染可靠）——异步等待/渲染风暴期间
     // 也不允许自动加载或快照覆盖干扰本地列表
     localChangeState[1](Date.now());
-    // v2.1.1：按 id 精确删除（title 可重复，按 title 查找会误删/漏删，表现为"要点两次"）
+    // 按 id 精确删除（title 可重复，按 title 查找会误删/漏删，表现为"要点两次"）
     var m = (memoriesState[0] || []).find(function(x) { return String(x.id) === String(mid); });
     if (!m || !m.id) {
       resultState[1]('未找到该记忆');
@@ -362,16 +362,16 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
     var result = parseResult(raw);
     logLine('[del] call done success=' + !!(result && result.success) + ' msg=' + ((result && result.message) || ''));
     if (result && result.success) {
-      // v2.1.1：本地立即移除该条（平台工具缓存可能返回旧列表，不再依赖重新拉取）
+      // 本地立即移除该条（平台工具缓存可能返回旧列表，不再依赖重新拉取）
       localChangeRef.current = Date.now();
       localChangeState[1](Date.now());
-      // v2.1.1：同步刷新 30 秒加载窗口——防止重渲染触发 loadOnEnter 重新拉取覆盖本地删除
+      // 同步刷新 30 秒加载窗口——防止重渲染触发 loadOnEnter 重新拉取覆盖本地删除
       loadedForRef.current = personaId + ':' + Date.now();
       var newList = (memoriesState[0] || []).filter(function(x) { return x.id !== m.id; });
-      // v2.1.3：写入模块级权威快照（渲染时强制应用，防旧快照覆盖）
+      // 写入模块级权威快照（渲染时强制应用，防旧快照覆盖）
       __cmeLocalList = newList;
       __cmeLocalTs = Date.now();
-      // v2.1.4：写入已删墓碑（useState 跨 mount 持久）——mount 后重新加载也能过滤掉
+      // 写入已删墓碑（useState 跨 mount 持久）——mount 后重新加载也能过滤掉
       var opsArr = [];
       try { opsArr = JSON.parse(localOpsState[0] || '[]'); } catch (e) {}
       if (opsArr.indexOf(String(m.id)) < 0) opsArr.push(String(m.id));
@@ -399,14 +399,14 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   }
   // 渲染时直接触发自动加载：不用 setTimeout，避免依赖事件循环；
   // loadOnEnter 异步不阻塞渲染，loadContext 幂等（防重入 + 节流 + 失败退避）。
-  // v2.1.2：本地变更（删除/创建）后 30 秒内跳过自动加载——列表由本地维护，
+  // 本地变更（删除/创建）后 30 秒内跳过自动加载——列表由本地维护，
   // 防止渲染风暴触发 loadContext 重新拉取（平台缓存旧数据）把变更"救回来"
-  // v2.1.4：用 useState 时间戳（跨 mount 持久，模块级变量 mount 后重置会失效）
+  // 用 useState 时间戳（跨 mount 持久，模块级变量 mount 后重置会失效）
   var localFreshNow = localChangeState[0] && (Date.now() - localChangeState[0]) < 30000;
   if (!localFreshNow) {
     loadOnEnter();
   }
-  // v2.1.0：假"正在读取"兜底——数据已就绪但 loading 残留 true 时强制清除并刷新界面。
+  // 假"正在读取"兜底——数据已就绪但 loading 残留 true 时强制清除并刷新界面。
   // 根因：Operit 对"相同值 setState"不触发重渲染，并发加载路径可能吞掉 loading 清除的渲染信号，
   // 导致数据早已加载完成但界面一直卡在"正在读取…"；此条件只在 loading=true 且数据非空时触发一次，不会死循环。
   if (loadingState[0] && memoriesState[0] && memoriesState[0].length > 0) {
@@ -414,7 +414,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   }
 
   if (!personaId) {
-    // v2.1.0：有 persona 缓存但尚未传入（onLoad 异步进行中）——显示识别占位而非报错
+    // 有 persona 缓存但尚未传入（onLoad 异步进行中）——显示识别占位而非报错
     var pc3 = personaCacheRef2.current || {};
     if (pc3.id && (Date.now() - (pc3.ts || 0)) < 60000) {
       return [UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 12 }, containerColor: colors.surfaceContainerHigh, padding: 18 }, [
@@ -468,19 +468,19 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
           : (idx % catColors.length === 1 ? colors.onTertiary : colors.onPrimary));
       chips.push(UI.Surface({ shape: { cornerRadius: 8 }, containerColor: selected ? color : colors.surfaceContainerHigh, padding: { left: 12, right: 12, top: 6, bottom: 6 }, onClick: function() {
           var catId = category.id;
-          // v2.1.0：点击已选中的分类 = 取消选中（全不选时展示全部四类）
+          // 点击已选中的分类 = 取消选中（全不选时展示全部四类）
           var next = (categoryState[0] === catId) ? '' : catId;
-          // v2.1.1：先同步 ref 再 setState——保存按钮闭包立即读到最新分类
+          // 先同步 ref 再 setState——保存按钮闭包立即读到最新分类
           categoryStateRef.current = next;
           categoryState[1](next);
-          // v2.1.0：优先前端过滤（全量缓存已加载时秒切，零工具调用）；缓存空时回退查询
+          // 优先前端过滤（全量缓存已加载时秒切，零工具调用）；缓存空时回退查询
           var cache = allMemoriesRef.current || [];
           var pid = personaState[0] && personaState[0].id;
           if (cache.length > 0) {
             var list = next ? cache.filter(function(m) { return m.category === next; }) : cache;
             var curM1 = memoriesState[0] || [];
             if (JSON.stringify(curM1) !== JSON.stringify(list)) memoriesState[1](list);
-            // v2.1.0：切换后更新 loadedForRef——30 秒内 loadOnEnter 不再自动重载，
+            // 切换后更新 loadedForRef——30 秒内 loadOnEnter 不再自动重载，
             // 避免"切换→setState→重渲染→loadOnEnter→又触发完整加载→正在读取卡住"
             if (pid) loadedForRef.current = pid + ':' + Date.now();
           } else if (pid) {
@@ -511,7 +511,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
       var rawTitle = String(memory.title || '').replace(/^\[persona:[^\]]+\]\s*/, '').trim();
       var fallbackText = String(memory.content || memory.description || '').trim();
       var displayTitle = rawTitle || (fallbackText.length > 20 ? fallbackText.substring(0, 20) + '…' : fallbackText) || '未命名记忆';
-      // v2.2.2：两段式确认（同待办页）——第一次点击进入确认态（变红），第二次点击执行删除；
+      // 两段式确认（同待办页）——第一次点击进入确认态（变红），第二次点击执行删除；
           // 渲染器双触发不会跳过确认态，天然防连点，无需防重入锁
           var delKey = String(memory.id);
           var isPending = pendingDeleteState[0] === delKey;
@@ -522,7 +522,7 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
             UI.Text({ text: memory.content || '', style: 'labelSmall', color: colors.onSurfaceVariant, maxLines: 3 }),
           ]),
           UI.Surface({ shape: { cornerRadius: 6 }, containerColor: isPending ? colors.error : colors.errorContainer, padding: 5, onClick: function() {
-            // v2.2.3：用 ref 判断（不依赖渲染闭包旧值）；state 只负责视觉
+            // 用 ref 判断（不依赖渲染闭包旧值）；state 只负责视觉
             if (pendingDeleteRef.current === delKey) {
               pendingDeleteRef.current = '';
               pendingDeleteState[1]('');

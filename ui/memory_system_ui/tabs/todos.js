@@ -28,7 +28,7 @@ function render(ctx, allData, states, actions) {
   // 切换待办
   async function toggleTodoItem(idOrIndex) {
     try {
-      // v2.3.0：前端统一传待办 id（精确勾选），不再依赖 index；失败也刷新消除过期行
+      // 前端统一传待办 id（精确勾选），不再依赖 index；失败也刷新消除过期行
       var raw = await ctx.callTool('memory_engine:toggle_todo', { id: idOrIndex });
       var r = parseResult(raw);
       if (r && r.success) {
@@ -43,7 +43,7 @@ function render(ctx, allData, states, actions) {
   // 删除
   async function deleteItem(category, idOrIndex) {
     try {
-      // v2.3.0：统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
+      // 统一传条目 id（精确删除）；失败（not found/out of range）也刷新列表消除过期行
       var raw = await ctx.callTool('memory_engine:delete_life_item', { category: category, id: idOrIndex });
       var r = parseResult(raw);
       if (r && r.success) {

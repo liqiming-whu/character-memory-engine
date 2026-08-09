@@ -46,7 +46,7 @@ function render(ctx, allData, states, actions, memoryState) {
     ]);
   }
 
-  // 统计（v1.8.5：与上方搜索框拉开间距）
+  // 统计（与上方搜索框拉开间距）
   items.push(UI.Spacer({ height: 8 }));
   items.push(UI.Row({ fillMaxWidth: true, horizontalArrangement: 'spaceEvenly' }, [
     UI.Surface({ shape: { cornerRadius: 10 }, containerColor: colors.errorContainer, padding: { left: 12, right: 12, top: 6, bottom: 6 } }, [
@@ -64,7 +64,7 @@ function render(ctx, allData, states, actions, memoryState) {
       ]),
     ]),
   ]));
-  items.push(UI.Spacer({ height: 4 }));  // v1.8.5：与信息列表拉近（原8）
+  items.push(UI.Spacer({ height: 4 }));  // 与信息列表拉近（原8）
 
   // 信息列表
   if (filteredInfo.length > 0) {
@@ -75,7 +75,7 @@ function render(ctx, allData, states, actions, memoryState) {
         items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.errorContainer, alpha: 0.5, padding: 10 }, [
           UI.Row({ fillMaxWidth: true, verticalAlignment: 'center' }, [
             UI.Surface({ shape: { cornerRadius: 6 }, containerColor: colors.error, alpha: 0.15, padding: { left: 6, right: 6, top: 2, bottom: 2 } }, [
-              UI.Text({ text: (inf.category && inf.category !== 'info') ? inf.category : (inf.title || '其他'), style: 'labelSmall', color: colors.error, fontSize: 10 }),  // v1.8.5: CME 兼容——子标题在 title 字段
+              UI.Text({ text: (inf.category && inf.category !== 'info') ? inf.category : (inf.title || '其他'), style: 'labelSmall', color: colors.error, fontSize: 10 }),  // CME 兼容——子标题在 title 字段
             ]),
             UI.Spacer({ width: 8 }),
             UI.Column({ weight: 1 }, [UI.Text({ text: inf.content || '', style: 'bodySmall', color: colors.onSurface, maxLines: 3 })]),
