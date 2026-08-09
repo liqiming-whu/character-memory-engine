@@ -190,6 +190,30 @@ var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
 var ROOT_DIR = '/root/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
+// ===== v2.4.3：会话级熔断（ChatGPT 2026-08-09 建议）=====
+// 根因：Operit 重启后 terminal 会话偶发跨启动残留 → 首次 hiddenExec 提交挂起 20s → UI 卡死闪退（11 轮实验实锤）
+// 熔断：首次提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交（onAppCreate/UI 双入口共享）
+// 恢复：onAppCreate 启动时清除（App 实例重建即恢复）；60s 冷却过期自动允许重试一次；用户打开终端页面后重试
+// 通道：文件（memory_engine.js 工具脚本环境无 setEnv，统一文件通道）
+var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
+function isChannelBroken() {
+  try {
+    var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
+    var t = (f && (f.content || f.text)) || '';
+    if (!t) return false;
+    var j = JSON.parse(t);
+    if (!(j && j.broken)) return false;
+    if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
+    return true;
+  } catch (e) { return false; }
+}
+function setChannelBroken() {
+  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: Date.now() }), false, 'android'); } catch (e) {}
+}
+function clearChannelBroken() {
+  try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
+}
+
 async function httpCall(action, payload) {
   try {
     var resp = await Tools.Net.http({
@@ -262,6 +286,10 @@ async function ensureWorkerUp() {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
+  // v2.4.3：会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
+  if (isChannelBroken()) {
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请打开一次终端页面后重试，或重新启动 Operit。' };
+  }
   // ① health 先检（httpCall 通道，快，不占 hiddenExec）
   var ping = null;
   try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
@@ -290,11 +318,14 @@ async function ensureWorkerUp() {
   try {
     freshKey();
     var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    await withTimeout(hiddenExecSafe(submitCmd, 15000), 20000, '提交启动命令超时。');
+    // v2.4.3：提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
+    await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
   } catch (e) {
     try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e2) {}
-    return { success: false, message: '提交 worker 启动失败: ' + (e && e.message ? e.message : String(e)) };
+    // v2.4.3：BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
+    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
+    setChannelBroken();
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面后重试，或重新启动 Operit。' };
   }
   cmeProbe('T2', 'launchId=' + launchId);
   // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
@@ -314,9 +345,9 @@ async function pollWorkerReady(launchId, src) {
       return { success: true, started: true, launchId: launchId };
     }
   }
-  // 超时：释放租约 + 保护窗口，允许下次重试
+  // 超时：释放租约 + 保护窗口（v2.4.3：30s→60s，避免坏通道上过快重试堆积），允许下次重试
   try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
   return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
@@ -596,6 +627,8 @@ async function onPromptFinalize(input) {
 function onAppCreate() {
     try {
         cmeProbe('T0');
+        // v2.4.3：新 App 实例启动 → 清除上次会话级熔断（避免异常状态污染本次正常启动）
+        clearChannelBroken();
         // v2.4 实验开关：DISABLE_APP_CREATE_LAUNCH=1 时禁用 onAppCreate 自动拉起（归因实验用）
         var _disable = '';
         try { _disable = getEnv('DISABLE_APP_CREATE_LAUNCH') || ''; } catch (e) {}

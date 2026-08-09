@@ -1,5 +1,14 @@
 # Changelog
-## v2.4.1（2026-08-09，onAppCreate 预热链路修复——withTimeout 未定义）
+## v2.4.3（2026-08-09，暖启动卡死缓解：会话级熔断 + 提交超时 5s/7s + BLOCK 60s）
+### 背景：Operit 重启后 terminal 会话偶发跨启动残留 → 首次 hiddenExec 提交挂起 20s → UI 卡死闪退（11 轮实验实锤：卡死 4/4 全残留、正常 7/7 无残留；构造残留可稳定复现）
+### 变更：
+- **会话级熔断**：首次提交超时 → 写 `channel_broken.json`（60s 冷却）→ 本次 App 实例内 onAppCreate/UI 双入口不再重复提交（避免同坏通道排队堆积）；App 重启（onAppCreate）自动清除
+- **提交超时 20s → 内部 5s / 外部 7s**（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
+- **BLOCK 30s → 60s**（JS 超时不等于 native 取消，过快重试会在坏通道上堆积；ChatGPT 建议）
+- 失败返回结构化错误：`code: TERMINAL_CHANNEL_UNAVAILABLE` + 明确提示（打开终端页面重试或重启 Operit）
+- 双模块同构：main.js（onAppCreate 路径）+ packages/memory_engine.js（UI 工具路径），文件通道（工具脚本环境无 setEnv）
+### 验证：语法检查通过；待实机（正常轮回归 + 构造残留轮验证 6~7s 快速失败）
+## v2.4.2（2026-08-09，诊断探针 ping_js——注册待查）
 ### 修复：main.js 引用未定义 withTimeout → onAppCreate 自动预热从未生效
 - **现象**：恢复 DISABLE_APP_CREATE_LAUNCH=0 后 engine.log 报 `onAppCreate: worker 未就绪: 提交 worker 启动失败: 'withTimeout' is not defined`
 - **根因**：v2.4.0 重构 ensureWorkerUp/pollWorkerReady 时引入 `withTimeout` 调用（health 先检/提交/轮询共 3 处），但 main.js 只定义了 `withRace`（功能等价、名字不同），未定义 `withTimeout`。memory_engine.js 有自己的 withTimeout 定义所以 UI 路径正常；main.js 的 onAppCreate 路径每次执行：health 先检抛错被 catch 吞掉 → 误判 worker 不在线 → 提交必失败 → 删租约 + 写 30s BLOCK。DISABLE_APP_CREATE_LAUNCH=1 归因实验期间该路径从未执行，缺陷被掩盖，恢复后首曝

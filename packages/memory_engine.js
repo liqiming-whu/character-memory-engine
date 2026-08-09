@@ -262,6 +262,28 @@ async function deployWorkerToData() {
   }
 }
 
+// ===== v2.4.3：会话级熔断（与 main.js 同构，文件通道——工具脚本环境无 setEnv）=====
+// 首次 hiddenExec 提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交
+// 恢复：App 重启 onAppCreate 清除；60s 过期自动允许重试一次；用户打开终端页面后重试
+var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
+function isChannelBroken() {
+  try {
+    var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
+    var t = (f && (f.content || f.text)) || '';
+    if (!t) return false;
+    var j = JSON.parse(t);
+    if (!(j && j.broken)) return false;
+    if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
+    return true;
+  } catch (e) { return false; }
+}
+function setChannelBroken() {
+  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: Date.now() }), false, 'android'); } catch (e) {}
+}
+function clearChannelBroken() {
+  try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
+}
+
 // 尝试拉起常驻 worker（幂等：已在线则跳过；force=true 时强制完整重启）。
 // python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
 async function ensureWorkerUp(force) {
@@ -276,6 +298,10 @@ async function ensureWorkerUp(force) {
       return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
     }
   } catch (e) {}
+  // v2.4.3：会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
+  if (isChannelBroken()) {
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请打开一次终端页面后重试，或重新启动 Operit。' };
+  }
   // ① health 先检（httpCall 通道，快，不占 hiddenExec）
   var ping = null;
   try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
@@ -304,11 +330,14 @@ async function ensureWorkerUp(force) {
   try {
     freshKey();
     var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    await withTimeout(hiddenExecSafe(submitCmd, 15000), 20000, '提交启动命令超时。');
+    // v2.4.3：提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
+    await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
   } catch (e) {
     try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e2) {}
-    return { success: false, message: '提交 worker 启动失败: ' + (e && e.message ? e.message : String(e)) };
+    // v2.4.3：BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
+    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
+    setChannelBroken();
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面后重试，或重新启动 Operit。' };
   }
   cmeProbe('T2', 'launchId=' + launchId);
   // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
@@ -328,9 +357,9 @@ async function pollWorkerReady(launchId, src) {
       return { success: true, started: true, launchId: launchId };
     }
   }
-  // 超时：释放租约 + 保护窗口，允许下次重试
+  // 超时：释放租约 + 保护窗口（v2.4.3：30s→60s，避免坏通道上过快重试堆积），允许下次重试
   try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 30000), false, 'android'); } catch (e) {}
+  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
   return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
 }
 
@@ -428,6 +457,22 @@ function makeTool(action) {
 }
 
 exports.list_memories = makeTool("list_memories");
+// v2.4.2 诊断探针：纯 JS 轻量工具（不依赖 worker、不调 ensureWorkerUp）
+// 用于区分「平台 Tool 回调通道整体阻塞」vs「CME 内部 ensureWorkerUp 锁传播」
+// 用法：暖启动卡死时调用本工具，若延迟 ~20s → 平台通道被阻塞；若立即返回 → CME 内部传播
+function pingJs(params) {
+  var t0 = Date.now();
+  try {
+    var mono = 0;
+    try { if (typeof performance !== 'undefined' && performance.now) mono = Math.round(performance.now() * 10) / 10; } catch (e) {}
+    var result = { pong: true, ts: Date.now(), mono: mono, input: (params && params.q) || '' };
+    dbgLog('timing', { action: 'ping_js', ms: Date.now() - t0 });
+    return finish({ success: true, data: result });
+  } catch (e) {
+    return finish({ success: false, message: String((e && e.message) || e) });
+  }
+}
+exports.ping_js = pingJs;
 exports.get_memory = makeTool("get_memory");
 exports.create_memory = makeTool("create_memory");
 exports.update_memory = makeTool("update_memory");
