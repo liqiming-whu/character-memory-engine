@@ -1,4 +1,10 @@
 # Changelog
+## v2.4.7（2026-08-09，修复 ping_js 探针未注册）
+### 背景：v2.4.2 加入的诊断探针 ping_js 调用报 `Tool not found`（挂账「注册待查」）。根因：Operit subpackage 解析器按 METADATA `tools` 数组注册工具，而 ping_js 只有 `exports` 导出、漏加 METADATA 声明 → 工具注册表不识别
+### 变更：
+- `packages/memory_engine.js` METADATA `tools` 补 `ping_js` 声明（含 q 参数），置于 ping_worker 之前
+### 验证：node --check 通过；METADATA 工具数 31 = exports 工具数 31（含 ping_js），注册对齐；已烧录（重启 Operit 生效后调用 ping_js 应立即返回 pong）
+
 ## v2.4.6（2026-08-09，展示上限统一：所有条目最多最近 100 条、新→旧）
 ### 背景：第 13 章「记忆过多展示与管理」按用户决策关闭——手机端插件受平台性能限制，不负责大规模展示记忆与增删查改；不做分页/批量管理，统一上限
 ### 变更：

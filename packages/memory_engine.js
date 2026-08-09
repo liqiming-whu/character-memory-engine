@@ -98,6 +98,9 @@ METADATA
             { "name": "stage", "type": "string", "required": false, "description": "关系阶段" },
             { "name": "notes", "type": "string", "required": false, "description": "备注" }
         ]},
+        { "name": "ping_js", "description": { "zh": "纯 JS 诊断探针（不经 worker、不调 ensureWorkerUp，用于区分平台 Tool 通道阻塞与 CME 内部传播）", "en": "Pure JS diag probe (no worker), distinguish platform channel block vs CME internal propagation" }, "parameters": [
+            { "name": "q", "type": "string", "required": false, "description": "任意标识" }
+        ]},
         { "name": "ping_worker", "description": { "zh": "检查 worker 是否可用", "en": "Check worker availability" }, "parameters": []},
         { "name": "get_logs", "description": { "zh": "读取日志文件尾部", "en": "Read log tail" }, "parameters": [
             { "name": "limit", "type": "integer", "required": false, "description": "返回行数，默认 300（UI 加载 300，页面渲染显示最近 100）" },
