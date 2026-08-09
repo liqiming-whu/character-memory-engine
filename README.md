@@ -80,11 +80,11 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
      - 执行：`LAUNCH_ID=L_manual_$(date +%s) setsid nohup bash /root/character_memory_engine/start_worker.sh </dev/null >> /sdcard/Download/Operit/character_memory_engine/logs/start_worker.log 2>&1 &`
      - 验证：`curl -X POST http://127.0.0.1:8765 -d '{"action":"ping_worker","params":{}}'` 返回 pong
      - 收尾：删除熔断/保护窗口/租约三文件（同上），插件 health 先检即直连已在线 worker
-  3. **重启 Operit**：最可靠但最重——`onAppCreate` 会清除熔断标记并重新拉起；重启后等待 10~15s 再进入插件。
+  3. **重启 Operit**：**不一定有效**（2026-08-10 实测）——重启只保证清除熔断标记，**坏会话是 proot 进程实体，可能跨重启残留**；`onAppCreate` 通过 hiddenExec 拉起时若撞上残留坏会话，提交依然挂起、拉起失败。重启后若仍失败，回到途径 A 清理。
   4. **等待熔断冷却过期**：会话级熔断 60s 冷却后自动允许重试一次；若坏会话仍残留，重试可能再次失败（仅作兜底，不主动依赖）。
 
 ### 已知限制与运维
-- **自动拉起 Worker**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 10s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。
+- **自动拉起 Worker**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 10s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。**坏会话可能跨重启残留**（proot 进程实体未被回收时），重启后 `onAppCreate` 撞上残留坏会话依然会拉起失败——此时按已知问题 2 途径 A 清理。
 - **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话；每次拉起强制 `freshKey` 全新会话，坏会话绝不复用。
 - **部署状态自检**：`deploy_status` 走 `/proc` 遍历（不依赖 pgrep，proot/Termux 通用）。
 - **调试广播**（需 `--user 0`）：
@@ -118,7 +118,7 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
 - BGE-small-zh int8（23.9MB，512 维）
 - 语义相似度：奶茶 vs 爱喝奶茶 = 0.95，奶茶 vs 健身房 = 0.47
 - 方案 A 8 项全 PASS、方案 B 22 项全 PASS、旧备份导入幂等 PASS
-- **自动拉起**：重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）
+- **自动拉起**：正常情况下重启 Operit 后 `onAppCreate` 秒级拉起 worker，无需手动干预（hiddenExec 固定会话 + setsid 后台分离）；坏会话残留跨重启时例外，见已知问题 2
 - **AI 自动提取四类角色记忆**：worker `analyze_chat` 调 DeepSeek 自动提取角色信息/关系/偏好/互动规则，四类 8 条验证落库
 详见 [docs/TECH_VALIDATION.md](docs/TECH_VALIDATION.md)。
 

@@ -1,9 +1,18 @@
 # Changelog
+## v2.4.9（2026-08-10，重启不一定能清理坏会话——认知修正）
+### 背景：2026-08-10 用户实测：**重启 Operit 不一定有效**——坏会话是 proot 进程实体，可能跨重启残留；重启只清除熔断标记，`onAppCreate` 通过 hiddenExec 拉起时若撞上残留坏会话，提交依然挂起、拉起失败。此前 v2.4.8 文档把「重启」列为最可靠方案的表述不成立
+### 变更：
+- README 已知问题 2 解决方案 3 修正：「重启 Operit 最可靠」→「**不一定有效**（重启只清熔断标记，坏会话可能跨重启残留；失败后回到途径 A /proc 清理）」
+- README 已知限制「自动拉起 Worker」补充：坏会话可能跨重启残留，`onAppCreate` 撞上残留坏会话依然拉起失败
+- `TERMINAL_CHANNEL_UNAVAILABLE` 错误文案 4 处（main.js ×2 + memory_engine.js ×2）追加「若仍失败，按 README『已知问题 2』清理残留坏会话」
+- md_reader 踩坑记录 10.4 / 一点建议第 7 条同步修正（重启不一定有效）
+### 验证：node --check 双文件通过；已烧录
+
 ## v2.4.8（2026-08-10，坏会话处置修正——「打开终端页面清理」实测无效）
 ### 背景：2026-08-10 坏会话导致 worker 拉起失败（提交挂起 → 熔断），实测「打开终端页面手动清理会话」**无效**：hiddenExec 会话不在终端页面的会话列表里，看不到坏会话、实际未清理
 ### 变更：
 - `TERMINAL_CHANNEL_UNAVAILABLE` 错误文案 4 处（main.js ×2 + memory_engine.js ×2）改为「请重新启动 Operit 后重试」，移除无效引导
-- README 已知问题 2 解决方案修正：重启 Operit 最可靠（onAppCreate 清除熔断 + 重新拉起）；等待 60s 熔断冷却；**明确标注打开终端页面无效**
+- README 已知问题 2 解决方案修正：重启 Operit 最可靠（onAppCreate 清除熔断 + 重新拉起）；等待 60s 熔断冷却；**明确标注打开终端页面无效**（⚠️ 2026-08-10 后续实测修正：「重启最可靠」不成立——坏会话可能跨重启残留，见 v2.4.9）
 - v2.4.4 CHANGELOG 补充实测修正说明
 ### 处置记录（2026-08-10 03:29）：坏会话提交挂起 → 熔断。绕过 hiddenExec 通道直接在终端环境执行 start_worker.sh 拉起 worker（HTTP 常驻服务不依赖 hiddenExec），清除熔断标记后插件恢复正常（ping_worker pong、vec_available=true、db=1298）
 ### 验证：node --check 双文件通过；已烧录
