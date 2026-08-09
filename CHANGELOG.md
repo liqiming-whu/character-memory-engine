@@ -1,5 +1,12 @@
 # Changelog
-## v2.4.5（2026-08-09，暖启动卡死加固：内存熔断兜底 + onAppCreate 冷却期尊重）
+## v2.4.6（2026-08-09，展示上限统一：所有条目最多最近 100 条、新→旧）
+### 背景：第 13 章「记忆过多展示与管理」按用户决策关闭——手机端插件受平台性能限制，不负责大规模展示记忆与增删查改；不做分页/批量管理，统一上限
+### 变更：
+- `worker.py` v2.1.9：`list_memories` 默认 limit 200→100（SQL 已是 `ORDER BY updated_at DESC`）；`load_life_data` 每类 limit 5000→100（新→旧）
+- `packages/memory_engine.js`：`list_memories` limit 描述默认 200→100
+- 前端统一：`tabs/character.js` 角色页 list_memories limit 200→100（其余调用点已 100）
+- 数据不删除（仅展示截断），注入/分析链路不受影响
+### 验证：node --check 5 文件 + py_compile 通过；已烧录；worker 版本检查自动部署 v2.1.9（重启 Operit 生效）
 ### 背景：第 17/18/19 轮实机触发验证——熔断写入早期不可用导致首败后提交风暴 ~1min（10 次重复提交）；第 21-23 轮实锤「提交 = 会话制造」、CME 调用模式是 Terminal Manager 坏状态放大因素（ChatGPT 评估后 v2.4.5 两项改动优先级确定）
 ### 变更：
 - **内存标志兜底**（双模块）：`setChannelBroken` 内存先行 + 文件 best-effort；`isChannelBroken` 先查内存再查文件——文件写失败（第 17 轮实锤 JS 写入早期不可用）时首败后本 VM 内后续提交仍立即熔断，止住 1 分钟提交风暴

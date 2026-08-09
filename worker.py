@@ -64,7 +64,7 @@ try:
 except Exception:
     _embedder = None
 
-VERSION = "2.1.8"
+VERSION = "2.1.9"
 
 # 路径：支持环境变量/参数覆盖。
 # 数据目录（engine.db / logs / backups）默认放 /sdcard/Download/Operit/character_memory_engine
@@ -550,7 +550,7 @@ def list_memories(conn, params):
     character_id = params.get("character_id")
     category = params.get("category")
     query = params.get("query")
-    limit = int(params.get("limit") or 200)
+    limit = int(params.get("limit") or 100)
     offset = int(params.get("offset") or 0)
     include_deleted = bool(params.get("include_deleted"))
 
@@ -796,7 +796,7 @@ def load_life_data(conn, params):
     character_id = params.get("character_id")
     result = {}
     for cat in LIFE_CATEGORIES:
-        r = list_memories(conn, {"character_id": character_id, "category": cat, "limit": 5000})
+        r = list_memories(conn, {"character_id": character_id, "category": cat, "limit": 100})
         result[cat] = r["memories"]
     # 附带注入配置与 UI 状态（旧前端期望 load_life_data 一并返回）
     injection = None
