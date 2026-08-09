@@ -265,8 +265,15 @@ async function deployWorkerToData() {
 // ===== v2.4.3：会话级熔断（与 main.js 同构，文件通道——工具脚本环境无 setEnv）=====
 // 首次 hiddenExec 提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交
 // 恢复：App 重启 onAppCreate 清除；60s 过期自动允许重试一次；用户打开终端页面后重试
+// v2.4.5：内存标志兜底——文件写失败时（第 17 轮实锤 JS 写入早期不可用）本 VM 内后续提交仍立即熔断
+var _memBrokenAt = 0;
 var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
 function isChannelBroken() {
+  // 内存标志优先（本 VM 生命周期内生效）
+  if (_memBrokenAt > 0) {
+    if (Date.now() - _memBrokenAt > 60000) { _memBrokenAt = 0; return false; }
+    return true;
+  }
   try {
     var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
     var t = (f && (f.content || f.text)) || '';
@@ -274,13 +281,16 @@ function isChannelBroken() {
     var j = JSON.parse(t);
     if (!(j && j.broken)) return false;
     if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
+    _memBrokenAt = j.at || Date.now(); // 同步进内存
     return true;
   } catch (e) { return false; }
 }
 function setChannelBroken() {
-  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: Date.now() }), false, 'android'); } catch (e) {}
+  _memBrokenAt = Date.now(); // 内存先行：文件写失败也不丢熔断状态
+  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: _memBrokenAt }), false, 'android'); } catch (e) {}
 }
 function clearChannelBroken() {
+  _memBrokenAt = 0;
   try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
 }
 
