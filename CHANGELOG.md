@@ -1,5 +1,12 @@
 # Changelog
-## v2.4.7（2026-08-09，修复 ping_js 探针未注册）
+## v2.4.8（2026-08-10，坏会话处置修正——「打开终端页面清理」实测无效）
+### 背景：2026-08-10 坏会话导致 worker 拉起失败（提交挂起 → 熔断），实测「打开终端页面手动清理会话」**无效**：hiddenExec 会话不在终端页面的会话列表里，看不到坏会话、实际未清理
+### 变更：
+- `TERMINAL_CHANNEL_UNAVAILABLE` 错误文案 4 处（main.js ×2 + memory_engine.js ×2）改为「请重新启动 Operit 后重试」，移除无效引导
+- README 已知问题 2 解决方案修正：重启 Operit 最可靠（onAppCreate 清除熔断 + 重新拉起）；等待 60s 熔断冷却；**明确标注打开终端页面无效**
+- v2.4.4 CHANGELOG 补充实测修正说明
+### 处置记录（2026-08-10 03:29）：坏会话提交挂起 → 熔断。绕过 hiddenExec 通道直接在终端环境执行 start_worker.sh 拉起 worker（HTTP 常驻服务不依赖 hiddenExec），清除熔断标记后插件恢复正常（ping_worker pong、vec_available=true、db=1298）
+### 验证：node --check 双文件通过；已烧录
 ### 背景：v2.4.2 加入的诊断探针 ping_js 调用报 `Tool not found`（挂账「注册待查」）。根因：Operit subpackage 解析器按 METADATA `tools` 数组注册工具，而 ping_js 只有 `exports` 导出、漏加 METADATA 声明 → 工具注册表不识别
 ### 变更：
 - `packages/memory_engine.js` METADATA `tools` 补 `ping_js` 声明（含 q 参数），置于 ping_worker 之前
@@ -23,6 +30,7 @@
 ## v2.4.4（2026-08-09，错误提示文案优化）
 ### 变更：
 - `TERMINAL_CHANNEL_UNAVAILABLE` 提示文案更新：引导用户「打开一次终端页面**手动清理会话**后重试」（终端界面有删除会话功能，比泛化的「打开终端页面重试」更可操作）
+- ⚠️ **2026-08-10 实测修正**：该引导无效——hiddenExec 会话**不在终端页面的会话列表里**，看不到坏会话、也无法清理；v2.4.8 已将文案改为「请重新启动 Operit 后重试」
 - 双模块同步（main.js + packages/memory_engine.js）
 ### 验证：语法检查通过；已烧录
 

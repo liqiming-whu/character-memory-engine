@@ -298,7 +298,7 @@ async function ensureWorkerUp() {
   } catch (e) {}
   // 会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
   if (isChannelBroken()) {
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请打开一次终端页面后重试，或重新启动 Operit。' };
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请重新启动 Operit 后重试。' };
   }
   // ① health 先检（httpCall 通道，快，不占 hiddenExec）
   var ping = null;
@@ -335,7 +335,7 @@ async function ensureWorkerUp() {
     // BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
     try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
     setChannelBroken();
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面手动清理会话后重试，或重新启动 Operit。' };
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请重新启动 Operit 后重试。' };
   }
   cmeProbe('T2', 'launchId=' + launchId);
   // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）

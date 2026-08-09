@@ -68,9 +68,9 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
 - **现象**：Operit 重启后偶发首次 `hiddenExec` 提交挂起（20s+），worker 无法拉起，工具报 `TERMINAL_CHANNEL_UNAVAILABLE` 或一直转圈。
 - **原因**：Operit 重启早期 terminal executor 会话存在竞态，可能创建**坏会话**（残留跨启动）；坏会话上的命令永久挂起，导致提交/探测卡死（11 轮实验实锤：卡死 4/4 全残留、正常 7/7 无残留）。
 - **解决方案**：
-  1. **打开一次终端页面**：手动打开 Operit 终端（触发会话重建/清理），再重试进入插件——`freshKey` 会自动漂移全新会话，坏会话绝不复用。
-  2. **重启 Operit**：`onAppCreate` 会清除熔断标记并重新拉起。
-  3. **自动熔断保护**：代码已内置会话级熔断（首次提交超时 → 写 `channel_broken.json` 60s 冷却 → 本次 App 实例内不再重复提交，避免坏通道上排队堆积），冷却期后自动允许重试一次，无需手动干预。
+  1. **重启 Operit**：最可靠——`onAppCreate` 会清除熔断标记并重新拉起；重启后等待 10~15s 再进入插件。
+  2. **等待熔断冷却过期**：会话级熔断 60s 冷却后自动允许重试一次；若坏会话仍残留，重试可能再次失败。
+  3. **注意：打开终端页面无效**（2026-08-10 实测）：hiddenExec 会话不在终端页面的会话列表里，**看不到坏会话、也无法清理**——「打开终端页面手动清理会话」的旧建议不成立，请勿依赖。
 
 ### 已知限制与运维
 - **自动拉起 Worker**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 10s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。
