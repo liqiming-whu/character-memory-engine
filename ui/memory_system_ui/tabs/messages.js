@@ -69,13 +69,13 @@ if (chatsState.length === 0 && !loadingChatsState && !msgsLoadedByEnter) {
     (async function() {
       try {
         var raw = await ctx.callTool('chat_exporter:list_chats_brief', {
-          limit: 200,
+          limit: 100,
           sort_order: 'desc'
         });
         var r = parseResult(raw);
         if (r && r.success && r.data && r.data.chats) {
           actions.setChats(r.data.chats);
-          actions.setHasMore(r.data.chats.length >= 200);
+          actions.setHasMore(r.data.chats.length >= 100);
           actions.setOffset(r.data.chats.length);
           // 把后端真实总数写进状态，供顶部显示
           if (actions.setTotalChats && r.data.totalCount !== undefined) {
@@ -114,7 +114,7 @@ try {
 // 这里不用 limit/offset，因为 listChat 不支持 offset。
 // 拉到的是全量前 N 条，再做去重合并。
 var raw = await ctx.callTool('chat_exporter:list_chats_brief', {
-limit: 200,
+limit: 100,
 sort_order: 'desc'
 });
 var r = parseResult(raw);
@@ -133,7 +133,7 @@ actions.setChats([...chatsState, ...newUnique]);
 }
 // 只要拉到的批次 size 达到 limit，就视为"还有更多"，等用户再点
 actions.setOffset(chatsState.length + newUnique.length);
-actions.setHasMore(fetchedChats.length >= 200);
+actions.setHasMore(fetchedChats.length >= 100);
 } else {
 actions.setHasMore(false);
 }

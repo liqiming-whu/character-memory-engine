@@ -414,13 +414,13 @@ try {
 // 注意：listChat 不支持 offset，所以一次性拉大数（200），
 // 真实对话数通过 totalCount 显示给用户，不再分页。
 var raw = await serialCall('chat_exporter:list_chats_brief', {
-limit: 200,
+limit: 100,
 sort_order: 'desc'
 });
 var r = parseResult(raw);
 if (r && r.success && r.data && r.data.chats) {
 chatsState[1](r.data.chats);
-hasMoreState[1](r.data.chats.length >= 200);
+hasMoreState[1](r.data.chats.length >= 100);
 offsetState[1](r.data.chats.length);
 // 记录后端真实总数（用于顶部"实际拉取数量"显示）
 if (r.data.totalCount !== undefined) totalChatsState[1](r.data.totalCount);
