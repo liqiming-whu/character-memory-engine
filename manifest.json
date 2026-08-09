@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "toolpkg_id": "com.operit.character_memory_engine",
-  "version": "2.4.3",
+  "version": "2.4.4",
   "main": "main.js",
   "display_name": {
     "zh": "角色记忆引擎",

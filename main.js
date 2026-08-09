@@ -325,7 +325,7 @@ async function ensureWorkerUp() {
     // v2.4.3：BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
     try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
     setChannelBroken();
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面后重试，或重新启动 Operit。' };
+    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请打开一次终端页面手动清理会话后重试，或重新启动 Operit。' };
   }
   cmeProbe('T2', 'launchId=' + launchId);
   // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
