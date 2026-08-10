@@ -639,54 +639,36 @@ async function onPromptFinalize(input) {
 // 延迟 10 秒：实测 Operit 重启早期（数秒内）调用 hiddenExec 有 executor 会话竞态风险，
 // 可能创建坏会话导致后续永久卡；原 30s 为保守兜底，2026-08-09 冷启动实测 proot 0.6s/worker 2s，
 // 10s 余量充足（暖启动 2s 就绪）；若实测不稳定再回退 30s
+// P0-C1（2026-08-10）：application_on_create 改为 health-only。
+// 目标：启动期 CME 不创建/不复用任何 terminal session、不部署、不 kill、不 hiddenExec。
+// Worker 离线时只记录 offline，不自动拉起——刻意接受的安全降级（Phase 0 safe-off），
+// 恢复启动由显式路径（Phase 1 或用户手动）承担。HTTP ping 是唯一 Worker ready 真值。
 function onAppCreate() {
     try {
         cmeProbe('T0');
-        // 冷却期尊重（ChatGPT 评估后升级为第一优先）——
-        // 上次失败留下的 broken 在冷却期内继续生效：跳过自动拉起，避免启动阶段主动制造更多会话压力
-        //（第 21/22/23 轮实锤「提交 = 会话制造」，启动早期提交会提高 Terminal Manager 恢复失败概率）
-        // 冷却过期后由 UI 路径自动重试（isChannelBroken 过期即清除，语义不变）
-        if (isChannelBroken()) {
-            jsLog('INFO', 'onAppCreate: 通道冷却期内（上次启动失败），跳过自动拉起，等待冷却过期后 UI 路径重试');
-            return;
-        }
-        // 新 App 实例启动 → 清除上次会话级熔断（避免异常状态污染本次正常启动）
-        clearChannelBroken();
-        // v2.4 实验开关：DISABLE_APP_CREATE_LAUNCH=1 时禁用 onAppCreate 自动拉起（归因实验用）
-        var _disable = '';
-        try { _disable = getEnv('DISABLE_APP_CREATE_LAUNCH') || ''; } catch (e) {}
-        if (_disable === '1' || _disable === 'true') {
-            jsLog('INFO', 'onAppCreate: DISABLE_APP_CREATE_LAUNCH=1，跳过自动拉起（归因实验模式）');
-            return;
-        }
+        // health-only：一次性短 HTTP health（独立短 deadline），在线写 ready，离线写 offline 后结束
         setTimeout(function () {
             (async function () {
-                // 先强制部署最新 worker.py 到 /root（覆盖旧版残留）
-                try { await deployWorkerToData(); } catch (e) {}
-                // 版本检查：文件 VERSION 与运行中进程不一致则 kill，下次调用自动拉起新版
+                var t0 = Date.now();
+                var ping = null;
                 try {
-                    var f = await Tools.Files.read(ROOT_DIR + '/worker.py');
-                    var ft = (f && (f.content || f.text)) || '';
-                    var m = /VERSION\s*=\s*["']([^"']+)["']/.exec(ft);
-                    var fileVer = m ? m[1] : '';
-                    if (fileVer) {
-                        var pingV = await httpCall('ping_worker', {});
-                        if (pingV && pingV.success && pingV.version && pingV.version !== fileVer) {
-                            jsLog('INFO', 'worker 版本变化 ' + pingV.version + ' -> ' + fileVer + '，重启 worker');
-                            // v2.4：轻量 kill（worker.pid），不再遍历 /proc
-                            var killCmd = 'kill $(cat /root/character_memory_engine/worker.pid 2>/dev/null) 2>/dev/null || true';
-                            await hiddenExecSafe(killCmd, 10000);
-                        }
-                    }
+                    ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout');
                 } catch (e) {}
-                var up = await ensureWorkerUp();
-                try { setEnv('MEMORY_ENGINE_WORKER_READY', (up && up.success) ? '1' : '0'); } catch (e) {}
-                if (!up || !up.success) jsLog('WARN', 'onAppCreate: worker 未就绪: ' + (up && up.message ? up.message : '未知原因'));
+                var up = !!(ping && ping.success);
+                try { setEnv('MEMORY_ENGINE_WORKER_READY', up ? '1' : '0'); } catch (e) {}
+                try {
+                    var st = { state: up ? 'ready' : 'offline', observedAt: new Date().toISOString(), source: 'application_on_create', ms: Date.now() - t0 };
+                    Tools.Files.write(DATA_DIR + '/logs/worker_state.json', JSON.stringify(st), false, 'android');
+                } catch (e) {}
+                if (up) {
+                    jsLog('INFO', 'onAppCreate: worker ready（' + (ping.version || '?') + ', ' + (Date.now() - t0) + 'ms）');
+                } else {
+                    jsLog('INFO', 'onAppCreate: worker offline（' + (Date.now() - t0) + 'ms），不自动拉起（Phase 0 safe-off）');
+                }
             })().catch(function (e) {
-                jsLog('ERROR', 'onAppCreate: worker 拉起异常: ' + (e && e.message ? e.message : String(e)));
-                try { setEnv('MEMORY_ENGINE_WORKER_READY', '0'); } catch (e2) {}
+                jsLog('ERROR', 'onAppCreate health 异常: ' + (e && e.message ? e.message : String(e)));
             });
-        }, 10000);
+        }, 2000);
     } catch (e) {}
     return { ok: true };
 }
