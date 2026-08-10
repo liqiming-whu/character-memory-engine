@@ -55,24 +55,8 @@ function jsLog(level, msg) {
   } catch (e) {}
 }
 
-// hiddenExec 会话策略（多轮实测）: // 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
-// 2. 方案：key 持久化到文件（跨模块重载有效）+ 失败自动漂移新 key（自愈），正常时固定 1 个会话零膨胀
-var KEY_FILE = '/sdcard/Download/Operit/character_memory_engine/logs/exec_key';
-function getKey() {
-  try { var k = Tools.Files.read(KEY_FILE); var t = (k && (k.content || k.text)) || ''; return (t && t.length < 64) ? t : 'cme'; } catch (e) { return 'cme'; }
-}
-function saveKey(k) { try { Tools.Files.write(KEY_FILE, k, false, 'android'); } catch (e) {} }
-function freshKey() { var k = 'cme_' + Date.now(); saveKey(k); return k; }
-function withRace(p, ms, msg) {
-  return new Promise(function (resolve, reject) {
-    var done = false;
-    var timer = setTimeout(function () { if (!done) { done = true; reject(new Error(msg || 'timeout')); } }, ms);
-    Promise.resolve(p).then(function (v) { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
-      function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
-  });
-}
-// 补齐 withTimeout（与 memory_engine.js 同实现）。修复 onAppCreate 路径
-// ensureWorkerUp/pollWorkerReady 引用未定义函数 → health 误判失败 + 提交必失败（2026-08-09 实测暴露）
+// P0-C3（2026-08-10）：删除 hiddenExec 生产链（getKey/saveKey/freshKey/withRace/hiddenExecSafe/execTerminal）。
+// hiddenExec 已被证实可制造跨重启残留的 proot+bash 坏会话；生产代码不再触碰 hiddenExec。
 function withTimeout(promise, ms, message) {
   var timer;
   return Promise.race([
@@ -81,17 +65,6 @@ function withTimeout(promise, ms, message) {
       timer = setTimeout(function () { reject(new Error(message || "操作超时。")); }, ms);
     })
   ]).finally(function () { clearTimeout(timer); });
-}
-async function hiddenExecSafe(cmd, timeoutMs) {
-  var key = getKey();
-  try {
-    return await withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: key }), timeoutMs, 'hiddenExec 超时');
-  } catch (e) {
-    // 会话疑似失效/被锁 → 漂移全新 key（文件持久化，跨模块重载保留），自愈重试一次
-    var nk = 'cme_' + Date.now();
-    saveKey(nk);
-    return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: nk }), timeoutMs, 'hiddenExec 二次超时');
-  }
 }
 function grabOut(r) {
   if (typeof r === 'string') return r;
@@ -106,18 +79,6 @@ function grabOut(r) {
     try { return JSON.stringify(r.data); } catch (e) { return String(r.data); }
   }
   try { return JSON.stringify(r); } catch (e) { return String(r); }
-}
-async function execTerminal(cmd, timeoutMs) {
-    try {
-        var r = await hiddenExecSafe(cmd, timeoutMs || 15000);
-        return grabOut(r);
-    } catch (e) {
-        try {
-            var sess = await Tools.System.terminal.create('engine_start');
-            await Tools.System.terminal.exec(sess.sessionId, cmd, timeoutMs || 15000);
-        } catch (e2) {}
-        return '';
-    }
 }
 
 // ===== 自动分析：PromptFinalize 冷却期结算旧对话 → worker AI 提取 =====
@@ -189,41 +150,6 @@ var DATA_DIR = '/sdcard/Download/Operit/character_memory_engine';
 var ROOT_DIR = '/root/character_memory_engine';
 try { DATA_DIR = getEnv('MEMORY_ENGINE_DIR') || DATA_DIR; } catch (e) {}
 
-// ===== 会话级熔断（ChatGPT 2026-08-09 建议）=====
-// 根因：Operit 重启后 terminal 会话偶发跨启动残留 → 首次 hiddenExec 提交挂起 20s → UI 卡死闪退（11 轮实验实锤）
-// 熔断：首次提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交（onAppCreate/UI 双入口共享）
-// 恢复：onAppCreate 启动时清除（App 实例重建即恢复）；60s 冷却过期自动允许重试一次；用户打开终端页面后重试
-// 通道：文件（memory_engine.js 工具脚本环境无 setEnv，统一文件通道）
-// 内存标志兜底——第 17 轮实锤「JS 文件写入早期不可用」导致首败后熔断不生效（10 次提交风暴 ~1min）；
-// 改为内存优先 + 文件 best-effort：文件写失败时本 VM 内后续提交仍立即熔断（App 重启 VM 重建，内存自动归零，语义不变）
-var _memBrokenAt = 0;
-var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
-function isChannelBroken() {
-  // 内存标志优先（本 VM 生命周期内生效）
-  if (_memBrokenAt > 0) {
-    if (Date.now() - _memBrokenAt > 60000) { _memBrokenAt = 0; return false; }
-    return true;
-  }
-  try {
-    var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
-    var t = (f && (f.content || f.text)) || '';
-    if (!t) return false;
-    var j = JSON.parse(t);
-    if (!(j && j.broken)) return false;
-    if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
-    _memBrokenAt = j.at || Date.now(); // 同步进内存
-    return true;
-  } catch (e) { return false; }
-}
-function setChannelBroken() {
-  _memBrokenAt = Date.now(); // 内存先行：文件写失败也不丢熔断状态
-  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: _memBrokenAt }), false, 'android'); } catch (e) {}
-}
-function clearChannelBroken() {
-  _memBrokenAt = 0;
-  try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
-}
-
 async function httpCall(action, payload) {
   try {
     var resp = await Tools.Net.http({
@@ -286,86 +212,9 @@ async function deployWorkerToData() {
   }
 }
 
-// 尝试拉起常驻 worker（幂等）。
-// 方案：worker.py/embed.py/models/db 复制到 /root/character_memory_engine（ext4 稳定），
-// 用 venv python 运行（完整向量），db 在 /root 运行（WAL），数据目录保留部署副本（sync_db 热备）。
-// setsid 隔离进程组，确保 hiddenExec 结束后后台进程存活。
-async function ensureWorkerUp() {
-  // v2.4：冷启动保护窗口 + 租约单飞 + 轻提交（hiddenExec 只提交，重活在 start_worker.sh 后台执行）+ health 轮询
-  // 修复：旧版 hiddenExec 执行完整重脚本，冷启动时阻塞平台工具通道 30-35s → UI 卡死闪退（2026-08-09 实锤）
-  var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
-  try {
-    var bf = Tools.Files.read(BLOCK_FILE);
-    var bfText = (bf && (bf.content || bf.text)) || '';
-    var bfTs = parseInt(bfText, 10) || 0;
-    if (bfTs > Date.now()) {
-      return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
-    }
-  } catch (e) {}
-  // 会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
-  if (isChannelBroken()) {
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请重新启动 Operit 后重试；若仍失败，按 README「已知问题 2」清理残留坏会话。' };
-  }
-  // ① health 先检（httpCall 通道，快，不占 hiddenExec）
-  var ping = null;
-  try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
-  if (ping && ping.success) return { success: true, alreadyUp: true };
-  // ② 部署最新 worker.py 等（JS 层复制，不走 hiddenExec）
-  try { await deployWorkerToData(); } catch (e) {}
-  // ③ 租约软裁决（跨模块状态落盘）：有效租约 → 不重复启动，直接轮询
-  var LEASE = DATA_DIR + '/logs/launch_lease.json';
-  var launchId = 'L' + Date.now() + '_' + Math.floor(Math.random() * 100000);
-  var now = Date.now();
-  try {
-    var lf = Tools.Files.read(LEASE);
-    var lfText = (lf && (lf.content || lf.text)) || '';
-    if (lfText) {
-      var lj = null;
-      try { lj = JSON.parse(lfText); } catch (e2) {}
-      if (lj && lj.expiresAt && lj.expiresAt > now) {
-        return await pollWorkerReady(lj.launchId || launchId, 'wait-lease');
-      }
-    }
-  } catch (e) {}
-  // ④ 抢租约
-  try { Tools.Files.write(LEASE, JSON.stringify({ launchId: launchId, source: 'onAppCreate', createdAt: now, expiresAt: now + 90000 }), false, 'android'); } catch (e) {}
-  // ⑤ T1 + 轻提交：hiddenExec 只提交 start_worker.sh（毫秒级返回），重活后台执行
-  cmeProbe('T1', 'launchId=' + launchId + ' source=onAppCreate');
-  try {
-    freshKey();
-    var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    // 提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
-    await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
-  } catch (e) {
-    try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    // BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
-    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
-    setChannelBroken();
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请重新启动 Operit 后重试；若仍失败，按 README「已知问题 2」清理残留坏会话。' };
-  }
-  cmeProbe('T2', 'launchId=' + launchId);
-  // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
-  return await pollWorkerReady(launchId, 'submitted');
-}
-
-async function pollWorkerReady(launchId, src) {
-  var LEASE = DATA_DIR + '/logs/launch_lease.json';
-  var deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
-    await new Promise(function (r) { setTimeout(r, 1500); });
-    var p = null;
-    try { p = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
-    if (p && p.success) {
-      cmeProbe('T6', 'launchId=' + launchId + ' src=' + src);
-      try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-      return { success: true, started: true, launchId: launchId };
-    }
-  }
-  // 超时：释放租约 + 保护窗口（30s→60s，避免坏通道上过快重试堆积），允许下次重试
-  try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
-  return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
-}
+// 显式资源部署（P0-C4：start_worker.sh 注册为 manifest resource，首次安装可用）。
+// 由显式安装路径调用（Phase 1）；onAppCreate 不调用（P0-C1 health-only）。
+// 注意：main.js 侧不再有自动拉起路径（P0-C3 删除 ensureWorkerUp/hiddenExec 链）。
 
 // PromptFinalize：冷却期检查 + 自动分析（必须命名导出）
 // ===== 记忆注入：按官方额外信息注入插件（message_insert）模式实现 =====

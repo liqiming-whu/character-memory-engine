@@ -282,115 +282,78 @@ async function deployWorkerToData() {
   }
 }
 
-// ===== 会话级熔断（与 main.js 同构，文件通道——工具脚本环境无 setEnv）=====
-// 首次 hiddenExec 提交超时 → 写 channel_broken.json（60s 冷却）→ 本次 App 实例内不再重复提交
-// 恢复：App 重启 onAppCreate 清除；60s 过期自动允许重试一次；用户打开终端页面后重试
-// 内存标志兜底——文件写失败时（第 17 轮实锤 JS 写入早期不可用）本 VM 内后续提交仍立即熔断
-var _memBrokenAt = 0;
-var CHANNEL_BROKEN_FILE = DATA_DIR + '/logs/channel_broken.json';
-function isChannelBroken() {
-  // 内存标志优先（本 VM 生命周期内生效）
-  if (_memBrokenAt > 0) {
-    if (Date.now() - _memBrokenAt > 60000) { _memBrokenAt = 0; return false; }
-    return true;
+// ===== WorkerLaunchLock：进程内原子单飞（P0-C3/选项A 2026-08-10）=====
+// 并发 start 时 A 持有 active promise，B/C await 同一 promise；不重复投递。
+var _launchActive = null; // { promise, at }
+function launchLock() {
+  if (_launchActive && _launchActive.promise && (Date.now() - _launchActive.at) < 30000) {
+    return _launchActive.promise;
   }
-  try {
-    var f = Tools.Files.read(CHANNEL_BROKEN_FILE);
-    var t = (f && (f.content || f.text)) || '';
-    if (!t) return false;
-    var j = JSON.parse(t);
-    if (!(j && j.broken)) return false;
-    if (Date.now() - (j.at || 0) > 60000) { clearChannelBroken(); return false; }
-    _memBrokenAt = j.at || Date.now(); // 同步进内存
-    return true;
-  } catch (e) { return false; }
-}
-function setChannelBroken() {
-  _memBrokenAt = Date.now(); // 内存先行：文件写失败也不丢熔断状态
-  try { Tools.Files.write(CHANNEL_BROKEN_FILE, JSON.stringify({ broken: true, at: _memBrokenAt }), false, 'android'); } catch (e) {}
-}
-function clearChannelBroken() {
-  _memBrokenAt = 0;
-  try { Tools.Files.deleteFile(CHANNEL_BROKEN_FILE, false, 'android'); } catch (e) {}
+  var p = null;
+  var holder = { at: Date.now() };
+  _launchActive = holder;
+  var release = function () { if (_launchActive === holder) _launchActive = null; };
+  p = new Promise(function (resolve) {
+    safeLaunchInternal().then(function (r) { release(); resolve(r); },
+      function (e) { release(); resolve({ success: false, message: String((e && e.message) || e) }); });
+  });
+  holder.promise = p;
+  return p;
 }
 
-// 尝试拉起常驻 worker（幂等：已在线则跳过；force=true 时强制完整重启）。
-// python 探测优先级：proot venv（含完整向量依赖）> 系统 python3。
-async function ensureWorkerUp(force) {
-  // v2.4：冷启动保护窗口 + 租约单飞 + 轻提交（hiddenExec 只提交，重活在 start_worker.sh 后台执行）+ health 轮询
-  // 修复：旧版 hiddenExec 执行完整重脚本，冷启动时阻塞平台工具通道 30-35s → UI 卡死闪退（2026-08-09 实锤）
-  var BLOCK_FILE = DATA_DIR + '/logs/launch_blocked_until';
+// 安全拉起：用 visible persistent terminal（terminal.create + input）投递 start_worker.sh，
+// 替代已废弃的 hiddenExec 链（P0-C3）。visible session 不产生 hidden 坏会话。
+async function safeLaunchInternal() {
   try {
-    var bf = Tools.Files.read(BLOCK_FILE);
-    var bfText = (bf && (bf.content || bf.text)) || '';
-    var bfTs = parseInt(bfText, 10) || 0;
-    if (bfTs > Date.now() && !force) {
-      return { success: false, message: 'worker 拉起进入冷启动保护窗口（' + Math.ceil((bfTs - Date.now()) / 1000) + 's 后自动恢复），请稍候重试。' };
+    // ① health 先检（快，不占 terminal）
+    var ping0 = null;
+    try { ping0 = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout'); } catch (e) {}
+    if (ping0 && ping0.success) return { success: true, alreadyUp: true };
+    // ② 资源部署（P0-C4：含 start_worker.sh）
+    try { await deployWorkerToData(); } catch (e) {}
+    // ③ visible terminal 投递（terminal.create + input + Enter，立即返回）
+    var launchId = 'L' + Date.now() + '_' + Math.floor(Math.random() * 100000);
+    var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo submitted_' + launchId;
+    var term = Tools.System && Tools.System.terminal;
+    if (!term || typeof term.create !== 'function' || typeof term.input !== 'function') {
+      return { success: false, code: 'TERMINAL_UNAVAILABLE', message: 'visible terminal 不可用，无法自动拉起 Worker' };
     }
-  } catch (e) {}
-  // 会话级熔断——首次提交超时后本次 App 实例内不再重复提交（避免同坏通道上排队堆积）
-  if (isChannelBroken()) {
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（上次启动失败），请重新启动 Operit 后重试；若仍失败，按 README「已知问题 2」清理残留坏会话。' };
-  }
-  // ① health 先检（httpCall 通道，快，不占 hiddenExec）
-  var ping = null;
-  try { ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
-  if (ping && ping.success) return { success: true, alreadyUp: true };
-  // ② 部署最新 worker.py 等（JS 层复制，不走 hiddenExec）
-  try { await deployWorkerToData(); } catch (e) {}
-  // ③ 租约软裁决（跨模块状态落盘）：有效租约 → 不重复启动，直接轮询
-  var LEASE = DATA_DIR + '/logs/launch_lease.json';
-  var launchId = 'L' + Date.now() + '_' + Math.floor(Math.random() * 100000);
-  var now = Date.now();
-  try {
-    var lf = Tools.Files.read(LEASE);
-    var lfText = (lf && (lf.content || lf.text)) || '';
-    if (lfText && !force) {
-      var lj = null;
-      try { lj = JSON.parse(lfText); } catch (e2) {}
-      if (lj && lj.expiresAt && lj.expiresAt > now) {
-        return await pollWorkerReady(lj.launchId || launchId, 'wait-lease');
+    var sess = null;
+    try {
+      sess = await term.create('cme_worker_launch');
+    } catch (e) {
+      return { success: false, code: 'TERMINAL_CREATE_FAILED', message: 'terminal.create 失败: ' + (e && e.message ? e.message : String(e)) };
+    }
+    if (!sess || !sess.sessionId) {
+      return { success: false, code: 'TERMINAL_NO_SESSION', message: '未获得 terminal session id' };
+    }
+    cmeProbe('T1', 'launchId=' + launchId + ' source=safeAutoLaunch');
+    try {
+      await term.input(sess.sessionId, { input: submitCmd, control: 'enter' });
+    } catch (e) {
+      return { success: false, code: 'TERMINAL_INPUT_FAILED', message: 'terminal.input 失败: ' + (e && e.message ? e.message : String(e)) };
+    }
+    cmeProbe('T2', 'launchId=' + launchId);
+    // ④ 有界等待 health（≤20s，轮询间隔 1.5s）
+    var deadline = Date.now() + 20000;
+    while (Date.now() < deadline) {
+      await new Promise(function (r) { setTimeout(r, 1500); });
+      var p = null;
+      try { p = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout'); } catch (e) {}
+      if (p && p.success) {
+        cmeProbe('T6', 'launchId=' + launchId + ' src=safeAutoLaunch');
+        return { success: true, started: true, launchId: launchId };
       }
     }
-  } catch (e) {}
-  // ④ 抢租约
-  try { Tools.Files.write(LEASE, JSON.stringify({ launchId: launchId, source: 'ensureWorkerUp', createdAt: now, expiresAt: now + 90000 }), false, 'android'); } catch (e) {}
-  // ⑤ T1 + 轻提交：hiddenExec 只提交 start_worker.sh（毫秒级返回），重活后台执行
-  cmeProbe('T1', 'launchId=' + launchId + ' source=ensure');
-  try {
-    freshKey();
-    var submitCmd = 'LAUNCH_ID=' + launchId + ' nohup setsid bash /root/character_memory_engine/start_worker.sh </dev/null >>' + DATA_DIR + '/logs/start_worker.log 2>&1 & echo launch_submitted';
-    // 提交超时 20s→内部5s/外部7s（正常提交 1.1~1.4s，余量充分；挂起时快速失败不拖 UI）
-    await withTimeout(hiddenExecSafe(submitCmd, 5000), 7000, '提交启动命令超时。');
+    return { success: false, code: 'LAUNCH_TIMEOUT', message: 'Worker 20s 内未就绪（launchId=' + launchId + '）。请检查 start_worker.log 或手动启动。' };
   } catch (e) {
-    try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e2) {}
-    // BLOCK 30s→60s + 会话级熔断（ChatGPT 建议：JS 超时不等于 native 取消，过快重试会在坏通道上堆积）
-    try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e2) {}
-    setChannelBroken();
-    return { success: false, code: 'TERMINAL_CHANNEL_UNAVAILABLE', message: '后台终端通道初始化异常（提交启动命令超时），请重新启动 Operit 后重试；若仍失败，按 README「已知问题 2」清理残留坏会话。' };
+    return { success: false, message: '自动拉起异常: ' + (e && e.message ? e.message : String(e)) };
   }
-  cmeProbe('T2', 'launchId=' + launchId);
-  // ⑥ health 轮询（httpCall 通道，不占 hiddenExec；worker 就绪即返回）
-  return await pollWorkerReady(launchId, 'submitted');
 }
 
-async function pollWorkerReady(launchId, src) {
-  var LEASE = DATA_DIR + '/logs/launch_lease.json';
-  var deadline = Date.now() + 45000;
-  while (Date.now() < deadline) {
-    await new Promise(function (r) { setTimeout(r, 1500); });
-    var p = null;
-    try { p = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout'); } catch (e) {}
-    if (p && p.success) {
-      cmeProbe('T6', 'launchId=' + launchId + ' src=' + src);
-      try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-      return { success: true, started: true, launchId: launchId };
-    }
-  }
-  // 超时：释放租约 + 保护窗口（30s→60s，避免坏通道上过快重试堆积），允许下次重试
-  try { Tools.Files.deleteFile(LEASE, false, 'android'); } catch (e) {}
-  try { Tools.Files.write(BLOCK_FILE, String(Date.now() + 60000), false, 'android'); } catch (e) {}
-  return { success: false, message: 'worker 45s 内未就绪（launchId=' + launchId + '），请稍候重试。' };
+// 对外统一入口：安全拉起（单飞）
+function safeAutoLaunch() {
+  return launchLock();
 }
 
 // detectPython 不再做任何 JS 侧文件探测——
@@ -401,75 +364,24 @@ async function detectPython() {
   return ROOT_DIR + '/.venv/bin/python3.12';
 }
 
-// hiddenExec 会话策略（多轮实测）: // 1. 会话按 executorKey 持久复用；Operit 后台期间 proot 可能被系统回收 → 会话失效 → 调用永久卡（取消机制也失效）
-// 2. 方案：key 持久化到文件（跨模块重载有效）+ 失败自动漂移新 key（自愈），正常时固定 1 个会话零膨胀
-var KEY_FILE = '/sdcard/Download/Operit/character_memory_engine/logs/exec_key';
-function getKey() {
-  try { var k = Tools.Files.read(KEY_FILE); var t = (k && (k.content || k.text)) || ''; return (t && t.length < 64) ? t : 'cme'; } catch (e) { return 'cme'; }
-}
-function saveKey(k) { try { Tools.Files.write(KEY_FILE, k, false, 'android'); } catch (e) {} }
-function freshKey() { var k = 'cme_' + Date.now(); saveKey(k); return k; }
-function withRace(p, ms, msg) {
-  return new Promise(function (resolve, reject) {
-    var done = false;
-    var timer = setTimeout(function () { if (!done) { done = true; reject(new Error(msg || 'timeout')); } }, ms);
-    Promise.resolve(p).then(function (v) { if (!done) { done = true; clearTimeout(timer); resolve(v); } },
-      function (e) { if (!done) { done = true; clearTimeout(timer); reject(e); } });
-  });
-}
-async function hiddenExecSafe(cmd, timeoutMs) {
-  var key = getKey();
-  try {
-    return await withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: key }), timeoutMs, 'hiddenExec 超时');
-  } catch (e) {
-    // 会话疑似失效/被锁 → 漂移全新 key（文件持久化，跨模块重载保留），自愈重试一次
-    var nk = 'cme_' + Date.now();
-    saveKey(nk);
-    return withRace(Tools.System.terminal.hiddenExec(cmd, { timeoutMs: timeoutMs, executorKey: nk }), timeoutMs, 'hiddenExec 二次超时');
-  }
-}
-function grabOut(r) {
-  if (typeof r === 'string') return r;
-  if (!r) return '';
-  if (r.stdout) return r.stdout;
-  if (r.output) return r.output;
-  if (r.body) return r.body;
-  if (r.result) return r.result;
-  if (r.text) return r.text;
-  if (r.data !== undefined) {
-    if (typeof r.data === 'string') return r.data;
-    try { return JSON.stringify(r.data); } catch (e) { return String(r.data); }
-  }
-  try { return JSON.stringify(r); } catch (e) { return String(r); }
-}
-// 执行 shell 并返回输出。
-// 与探针一致：直接传命令给 hiddenExec（不包 bash -lc，探针验证这样能正常返回输出）
-async function execSh(cmd) {
-  var terminal = Tools.System && Tools.System.terminal;
-  if (!terminal) return '';
-  try {
-    if (typeof terminal.hiddenExec === 'function') {
-      return grabOut(await hiddenExecSafe(cmd, 6000));
-    }
-    var sess = await terminal.create('cme_sh');
-    var rr = await terminal.exec(sess.sessionId, cmd, 10000);
-    try { await terminal.close(sess.sessionId); } catch (e) {}
-    return grabOut(rr);
-  } catch (e) { return ''; }
-}
+// P0-C3（2026-08-10）：删除 hiddenExec 生产链（getKey/saveKey/freshKey/withRace/hiddenExecSafe/execSh/grabOut）。
+// 拉起统一走 safeAutoLaunch（visible terminal）；生产代码不再触碰 hiddenExec。
 
-// 工具调用入口（P0-C2 2026-08-10）：普通业务只请求一次，快速失败，不自动拉起、不重放。
-// 错误域区分：
-//   - transport（worker 离线/未响应）→ 返回 WORKER_OFFLINE，不 ensureWorkerUp（避免 hiddenExec 污染链）
-//   - business（worker 正常返回的业务失败/参数错误）→ 原样返回，不重放
-//   - protocol（响应无法解析）→ 返回 WORKER_PROTOCOL_ERROR，不重放
-// 显式启动/重启（deploy_restart 等）由上层单独处理，不走本入口的自动拉起。
+// 工具调用入口（P0-C2/P0-C3 2026-08-10）：普通业务只请求一次。
+// transport 离线 → 尝试 safeAutoLaunch（visible terminal 安全拉起，单飞），成功则重试一次业务；
+//                     拉起失败/超时 → WORKER_OFFLINE 快速失败。
+// business/protocol → 原样返回，不重放。
 function run(action, payload) {
   return httpCall(action, payload || {}).then(function (r) {
     if (r && r.success) return r;
-    // 只有 transport 域才可能通过"拉起"恢复；Phase 0 一律不自动拉起（safe-off）
     if (r && r.errorDomain === 'transport') {
-      return { success: false, code: 'WORKER_OFFLINE', errorDomain: 'transport', message: 'Worker 离线，未自动拉起（Phase 0 safe-off）。请手动启动后重试：' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+      // 选项A：离线时用 visible terminal 安全拉起（不制造 hidden 坏会话），最多一次
+      return safeAutoLaunch().then(function (up) {
+        if (up && up.success) {
+          return httpCall(action, payload || {}); // 拉起成功，重试一次原业务
+        }
+        return { success: false, code: 'WORKER_OFFLINE', errorDomain: 'transport', message: (up && up.message) || 'Worker 离线，自动拉起失败。请手动启动后重试：' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+      });
     }
     // business / protocol：原样返回（业务失败如实呈现，不重放）
     return r;
@@ -843,44 +755,33 @@ async function triggerAnalysis(params) {
 
 // ===== diag_engine：插件侧诊断（不经 worker，worker 未运行时也能用）=====
 // 解决死锁：worker 起不来时部署页无法通过 worker 查状态/看日志。
-// 这里直接用 Tools.System.terminal + Tools.Files 读启动日志/进程/engine.log。
-// 注意：所有异步调用都必须 withTimeout 保护，否则 hiddenExec 卡住会让整个诊断挂起。
+// P0-C3：移除 hiddenExec 探测（已废弃）；改为 HTTP health + Files 读日志 + start_worker.log。
+// 注意：所有异步调用都必须 withTimeout 保护。
 async function diagEngine(params) {
     try {
-        var out = { worker_up: false, tmp_log_tail: '', engine_log_tail: '', process_count: 0, pids: [], messages: [], env: {} };
+        var out = { worker_up: false, tmp_log_tail: '', engine_log_tail: '', start_worker_log_tail: '', process_count: 0, pids: [], messages: [], env: {} };
 
-        // 0) 探测 hiddenExec 环境（python 可用性、proot 环境）
+        // 0) HTTP health 探测（不碰 terminal，worker 在线/离线都能回答）
         try {
-            var pyCheck = await withTimeout(
-                hiddenExecSafe("command -v python3; echo '---'; python3 --version 2>&1; echo '---'; command -v python3.12; echo '---'; ls /root/character_memory_engine/.venv/bin/python3.12 2>&1; echo '---'; echo 'whoami='$(whoami)", 8000),
-                10000, '环境探测超时。'
-            );
-            out.env.py = String(pyCheck && (pyCheck.stdout || pyCheck.output || pyCheck) || '').trim();
-        } catch (e) { out.messages.push('环境探测失败: ' + (e.message || String(e))); }
+            var ping = await withTimeout(httpCall('ping_worker', {}), 4000, 'ping timeout');
+            out.worker_up = !!(ping && ping.success);
+            out.env.py = 'worker=' + (out.worker_up ? (ping.version || 'ok') : 'offline');
+            if (out.worker_up) { out.process_count = 1; out.pids = [ping.version || '?']; }
+        } catch (e) { out.worker_up = false; out.messages.push('health 探测失败: ' + (e.message || String(e))); }
 
-        // 1) 检查 worker 进程（/proc 遍历，pgrep 在 proot 不存在）
+        // 1) 读 start_worker.log（启动脚本日志，worker 未启动也有）
         try {
-            var pg = await withTimeout(
-                hiddenExecSafe("F=''; for p in /proc/[0-9]*; do if [ -r \"$p/cmdline\" ]; then c=$(tr '\\0' ' ' < \"$p/cmdline\" 2>/dev/null); case \"$c\" in *worker.py*) F=\"$F $(basename $p)\";; esac; fi; done; echo $F", 6000),
-                8000, '进程扫描超时。'
-            );
-            var pgs = String(pg && (pg.stdout || pg.output || pg) || '').trim();
-            if (pgs) {
-                out.process_count = pgs.split(/\s+/).filter(Boolean).length;
-                out.pids = pgs.split(/\s+/).filter(Boolean);
-            }
-        } catch (e) { out.messages.push('进程扫描失败: ' + (e.message || String(e))); }
+            var sl = await withTimeout(Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/logs/start_worker.log'), 5000, '读 start_worker.log 超时。');
+            out.start_worker_log_tail = String(sl && (sl.content || sl.text || '') || '').split('\n').slice(-8).join('\n');
+        } catch (e) { out.messages.push('start_worker.log 不可读'); }
 
-        // 2) 读 worker 启动日志（旧 CLI 架构路径已废弃；HTTP 常驻架构日志在 engine.log，见步骤 3）
-
-        // 3) 读 engine.log（worker 自身日志，若有）
+        // 2) 读 engine.log（worker 自身日志，若有）
         try {
             var el = await withTimeout(Tools.Files.read('/sdcard/Download/Operit/character_memory_engine/logs/engine.log'), 5000, '读 engine.log 超时。');
             var etxt = el && (el.content || el.text || '') || '';
             out.engine_log_tail = String(etxt).split('\n').slice(-15).join('\n');
         } catch (e) { /* engine.log 可能尚未生成 */ }
 
-        out.worker_up = out.process_count > 0;
         return finish({ success: true, diag: out });
     } catch (e) {
         return finish({ success: false, message: '诊断异常: ' + (e.message || String(e)) });
@@ -925,13 +826,7 @@ function deployInstall(params) {
   });
 }
 function deployRestart(params) {
-  // 先热备当前 db（worker 在线时），再强制完整重启（kill + db 同步 + 拉起）
-  return Promise.resolve()
-    .then(function () { try { return run('sync_db', {}); } catch (e) { return null; } })
-    .then(function () { return ensureWorkerUp(true); })
-    .then(function (result) {
-      return finish(result);
-    }).catch(function (e) {
-      return finish({ success: false, message: e && e.message ? e.message : String(e) });
-    });
+  // P0-C3（2026-08-10）：Phase 0 显式重启返回 WORKER_RECOVERY_DISABLED，
+  // 不再走 ensureWorkerUp/hiddenExec 强制重启链。用户需手动启动或等待后续 Phase 1 显式 recovery。
+  return finish({ success: false, code: 'WORKER_RECOVERY_DISABLED', message: 'Worker 重启功能在当前版本暂不可用（Phase 0 safe-off）。如需重启请手动执行：kill $(cat ' + ROOT_DIR + '/worker.pid 2>/dev/null); ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' });
 }
