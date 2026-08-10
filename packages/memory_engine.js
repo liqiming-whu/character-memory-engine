@@ -196,7 +196,11 @@ function withTimeout(promise, ms, message) {
   ]).finally(function () { clearTimeout(timer); });
 }
 
-// 经 HTTP 调用 worker；worker 不在线时给出可执行的启动指引
+// 经 HTTP 调用 worker；P0-C2 增加错误域标记（errorDomain）：
+//   'transport' —— 连接拒绝/connect timeout/无响应（worker 离线）
+//   'protocol'  —— 收到响应但非 JSON / HTTP 错误无 success 字段
+//   'business'  —— Worker 正常返回 JSON（success 由 Worker 决定，业务错误/参数错误等）
+// 普通业务调用方据此决定是否可自动拉起（transport 才可能拉起，且 Phase 0 不自动拉起）
 async function httpCall(action, payload) {
   var resp;
   try {
@@ -215,7 +219,7 @@ async function httpCall(action, payload) {
       'worker 调用超时。'
     );
   } catch (e) {
-    return { success: false, message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    return { success: false, code: 'WORKER_OFFLINE', errorDomain: 'transport', message: 'worker 未响应（' + WORKER_URL + '）：' + (e && e.message ? e.message : String(e)) + '。启动命令：nohup ' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
   }
   var text = String(resp && (resp.content || resp.body || '') || '');
   var data = null;
@@ -224,10 +228,14 @@ async function httpCall(action, payload) {
     if (resp && resp.statusCode >= 400 && data.success === undefined) {
       data.success = false;
       data.httpStatus = resp.statusCode;
+      data.errorDomain = 'protocol';
+    } else if (data.errorDomain === undefined) {
+      // Worker 正常 JSON 响应：业务域（success 由 Worker 决定）
+      data.errorDomain = 'business';
     }
     return data;
   }
-  return { success: false, message: 'worker 返回无法解析: HTTP ' + (resp && resp.statusCode) + ' ' + text.slice(0, 200) };
+  return { success: false, code: 'WORKER_PROTOCOL_ERROR', errorDomain: 'protocol', message: 'worker 返回无法解析: HTTP ' + (resp && resp.statusCode) + ' ' + text.slice(0, 200) };
 }
 
 // 部署 worker.py / embed.py / models 到 DATA_DIR（用 dual-life-hub 验证的 readResource 签名）。
@@ -450,15 +458,21 @@ async function execSh(cmd) {
   } catch (e) { return ''; }
 }
 
-// 工具调用入口：HTTP 直调；失败时尝试拉起 worker 一次再重试
+// 工具调用入口（P0-C2 2026-08-10）：普通业务只请求一次，快速失败，不自动拉起、不重放。
+// 错误域区分：
+//   - transport（worker 离线/未响应）→ 返回 WORKER_OFFLINE，不 ensureWorkerUp（避免 hiddenExec 污染链）
+//   - business（worker 正常返回的业务失败/参数错误）→ 原样返回，不重放
+//   - protocol（响应无法解析）→ 返回 WORKER_PROTOCOL_ERROR，不重放
+// 显式启动/重启（deploy_restart 等）由上层单独处理，不走本入口的自动拉起。
 function run(action, payload) {
   return httpCall(action, payload || {}).then(function (r) {
     if (r && r.success) return r;
-    // worker 不在线或调用失败：尝试拉起一次再重试
-    return ensureWorkerUp().then(function (up) {
-      if (up && !up.success) return up;
-      return httpCall(action, payload || {});
-    });
+    // 只有 transport 域才可能通过"拉起"恢复；Phase 0 一律不自动拉起（safe-off）
+    if (r && r.errorDomain === 'transport') {
+      return { success: false, code: 'WORKER_OFFLINE', errorDomain: 'transport', message: 'Worker 离线，未自动拉起（Phase 0 safe-off）。请手动启动后重试：' + ROOT_DIR + '/.venv/bin/python3.12 ' + ROOT_DIR + '/worker.py --port 8765 --db ' + ROOT_DIR + '/engine.db &' };
+    }
+    // business / protocol：原样返回（业务失败如实呈现，不重放）
+    return r;
   });
 }
 
