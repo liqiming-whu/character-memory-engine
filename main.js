@@ -259,12 +259,18 @@ async function deployWorkerToData() {
     await Tools.Files.mkdir(DATA_DIR + '/models', true, 'android');
     var pairs = [
       ['engine_worker_py', 'worker.py'],
-      ['engine_embed_py', 'embed.py']
+      ['engine_embed_py', 'embed.py'],
+      ['engine_start_worker_sh', 'start_worker.sh']
     ];
     for (var i = 0; i < pairs.length; i++) {
       try {
         var src = await ToolPkg.readResource(pairs[i][0], pairs[i][1], false);
         if (src) await Tools.Files.copy(String(src), DATA_DIR + '/' + pairs[i][1], true, 'android', 'linux');
+        // start_worker.sh 同时部署到 ROOT_DIR（P0-C4：首次安装即可用，不依赖脚本自同步时序）
+        if (pairs[i][1] === 'start_worker.sh') {
+          try { await Tools.Files.mkdir(ROOT_DIR, true, 'linux'); } catch (e3) {}
+          await Tools.Files.copy(String(src), ROOT_DIR + '/start_worker.sh', true, 'android', 'linux');
+        }
       } catch (e) {}
     }
     var mf = [['engine_model_config','config.json'],['engine_model_onnx','model_int8.onnx'],['engine_model_tokenizer','tokenizer.json']];

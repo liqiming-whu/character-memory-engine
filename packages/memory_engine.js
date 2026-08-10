@@ -247,6 +247,15 @@ async function deployWorkerToData() {
       var eSrc = await ToolPkg.readResource('engine_embed_py', 'embed.py', false);
       if (eSrc) await Tools.Files.copy(String(eSrc), DATA_DIR + '/embed.py', false, 'android', 'linux');
     } catch (e) {}
+    // start_worker.sh（P0-C4：注册为 manifest resource，首次安装可部署；DATA_DIR 副本用于 ROOT_DIR 自同步）
+    try {
+      var swSrc = await ToolPkg.readResource('engine_start_worker_sh', 'start_worker.sh', false);
+      if (swSrc) {
+        await Tools.Files.copy(String(swSrc), DATA_DIR + '/start_worker.sh', true, 'android', 'linux');
+        try { await Tools.Files.mkdir(ROOT_DIR, true, 'linux'); } catch (e3) {}
+        await Tools.Files.copy(String(swSrc), ROOT_DIR + '/start_worker.sh', true, 'android', 'linux');
+      }
+    } catch (e) {}
     // models
     var modelFiles = [
       ['engine_model_config', 'config.json'],
@@ -761,19 +770,31 @@ async function triggerAnalysis(params) {
             try {
                 var r = await analyzeChat({ chat_id: chatId, character_id: callerCardId, persona_name: personaName });
                 var rOk = !!(r && r.success && (!r.data || r.data.success !== false));
-                // 推进水位线
-                var maxTs = 0;
-                for (var mi = 0; mi < allMessages.length; mi++) {
-                    var t = tsToMs(allMessages[mi].timestamp);
-                    if (t > maxTs) maxTs = t;
-                }
+                // P0-C5：只在分析明确成功时推进水位线；失败保留原水位线，
+                // 失败批次下次可重试（否则失败被跳过导致记忆永久丢失）
                 var tr2 = await readTriggerJson() || {};
                 if (!tr2.watermarks) tr2.watermarks = {};
-                if (maxTs > 0) tr2.watermarks[chatId] = maxTs;
-                tr2.lastAnalyzedAt = new Date().toISOString();
-                tr2.lastAnalyzedChatId = chatId;
-                tr2.lastAnalyzedNewCount = count;
-                tr2.lastResult = rOk ? 'has_data' : 'failed';
+                if (rOk) {
+                    var maxTs = 0;
+                    for (var mi = 0; mi < allMessages.length; mi++) {
+                        var t = tsToMs(allMessages[mi].timestamp);
+                        if (t > maxTs) maxTs = t;
+                    }
+                    if (maxTs > 0) tr2.watermarks[chatId] = maxTs;
+                    tr2.lastAnalyzedAt = new Date().toISOString();
+                    tr2.lastAnalyzedChatId = chatId;
+                    tr2.lastAnalyzedNewCount = count;
+                    tr2.lastResult = 'has_data';
+                    tr2.lastError = '';
+                    tr2.analyzeFailCount = 0;
+                } else {
+                    // 失败：不推进水位线，记录错误与失败次数（供诊断/退避参考）
+                    tr2.lastAnalyzedChatId = chatId;
+                    tr2.lastAnalyzedNewCount = count;
+                    tr2.lastResult = 'failed';
+                    tr2.lastError = (r && (r.message || (r.data && r.data.message))) || '未知错误';
+                    tr2.analyzeFailCount = (tr2.analyzeFailCount || 0) + 1;
+                }
                 try {
                     await writeTriggerAtomic(tr2);
                 } catch (e) {}

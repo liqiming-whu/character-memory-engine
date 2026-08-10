@@ -38,6 +38,10 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   var personaName = String((personaState[0] && personaState[0].name) || '');
   var personaType = String((personaState[0] && personaState[0].type) || '');
   var memoriesState = ctx.useState('character_memories', []);
+  // 本地变更时间戳（useState 版，跨渲染绝对可靠）——必须在 screenFiltered 使用之前初始化：
+  // P0-C7 修复：var 提升只提升声明不提升赋值，原声明在 :80 但 :56 已读取 localChangeState[0]，
+  // 当传入角色快照（screenFiltered.length>0）时必然抛 "Cannot read properties of undefined"
+  var localChangeState = ctx.useState('character_local_change_v3', 0);
   // 记录最近一次接受的 screen 快照签名——本地变更（删除/创建）后 screen 重渲染仍会传旧快照，
   // 只有快照内容变化（screen 重新拉取）才接受，避免"删了又回来"需要点两次
   var lastScreenMemRef = ctx.useRef('character_last_screen_mem_sig', '');
@@ -72,12 +76,8 @@ function render(ctx, personaFromScreen, memoriesFromScreen) {
   // 分类即时 ref——chips onClick 里先同步 ref 再 setState，
   // 防止"选完分类立刻点保存"时保存按钮闭包仍捕获旧分类（导致存成 info/通用记忆）
   var categoryStateRef = ctx.useRef('character_category_ref_v2', '');
-  // 本地变更时间戳（删除/创建成功时刷新）——用于抑制 screen 旧快照覆盖
+  // 本地变更时间戳（useRef 版，chips/按钮点击即时写入，读取不依赖渲染闭包）
   var localChangeRef = ctx.useRef('character_local_change_v2', 0);
-  // 本地变更时间戳（useState 版，跨渲染绝对可靠）——渲染风暴/异步等待期间，
-  // useRef 读取可能拿到旧值导致保护失效；useState 与列表更新同机制，30 秒内禁止
-  // loadOnEnter 自动加载与 screen 快照覆盖，列表完全由本地维护
-  var localChangeState = ctx.useState('character_local_change_v3', 0);
   // 已删记忆"墓碑"（useState 跨 mount 持久）——删除成功后记录 id，
   // 每次渲染强制从列表过滤；即使组件重新挂载（mount）后重新加载返回含已删记忆的
   // 旧列表，渲染时也会被墓碑过滤掉，60 秒后过期恢复正常同步

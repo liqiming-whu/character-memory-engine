@@ -68,6 +68,11 @@
       "key": "engine_model_tokenizer",
       "path": "models/tokenizer.json",
       "mime": "application/json"
+    },
+    {
+      "key": "engine_start_worker_sh",
+      "path": "start_worker.sh",
+      "mime": "text/x-shellscript"
     }
   ],
   "color": "#00796B"
