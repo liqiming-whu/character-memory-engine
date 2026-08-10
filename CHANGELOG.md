@@ -1,4 +1,20 @@
 # Changelog
+## v2.5.0（2026-08-10，移除 hiddenExec 生产链——安全拉起重构）
+### 背景：hiddenExec 已被多轮实锤可制造「proot + bash --noprofile --norc」坏会话（pipe_read 挂起、跨重启残留、累积后全局挂起）。v2.4.9 之前所有坏会话问题都源于此。本版从架构上移除 hiddenExec 生产路径，改用已验证的 visible terminal 安全拉起。
+### 变更：
+- **P0-C1（onAppCreate health-only）**：启动期只做 2s 后单次 HTTP health，写 `worker_state.json` ready/offline；不部署、不 kill、不 hiddenExec、不自动拉起（Phase 0 safe-off）
+- **P0-C2（错误域区分）**：`httpCall` 增加 `errorDomain`（transport/business/protocol）；普通业务只请求一次，业务失败原样返回不重放
+- **P0-C3（移除 hiddenExec 生产链）**：删除 `getKey/saveKey/freshKey/withRace/hiddenExecSafe/execSh/execTerminal/grabOut/ensureWorkerUp/pollWorkerReady/channelBroken` 全部家族（main.js + memory_engine.js，净删 352 行）；`deploy_restart` → `WORKER_RECOVERY_DISABLED`；`diag_engine` → HTTP health + Files 日志
+- **选项 A（safeAutoLaunch）**：worker 离线时用 **visible terminal**（`terminal.create('cme_worker_launch')` + input + Enter）投递 `start_worker.sh`；`WorkerLaunchLock` 进程内单飞（并发共享同一 promise）；有界等待 health ≤20s；拉起成功重试原业务一次，失败返回 `WORKER_OFFLINE`
+- **P0-C4（resource 注册）**：`start_worker.sh` 注册为 manifest resource（`engine_start_worker_sh`），首次安装可部署到 DATA_DIR + ROOT_DIR
+- **P0-C5（水位线）**：自动分析只在成功时推进水位线，失败保留原水位线 + 记录 `lastError`/`analyzeFailCount`
+- **P0-C7（角色页崩溃）**：`localChangeState` useState 声明提前到使用之前（修复 `undefined[0]` TypeError 确定性崩溃）
+### 验证（真机）：
+- 离线调用业务 → safeAutoLaunch 自动拉起（cold_probe `T6 src=safeAutoLaunch`）→ 业务成功；**拉起后坏会话 = 0**（旧链必留）
+- worker 在线时调用业务 → 零重复投递（start_worker.log 无新增）
+- 生产代码 hiddenExec 零残留（仅注释）；node --check 全部通过；已烧录
+- Operit 上游 issue 草稿：`reports/codex/operit-upstream-issues-2026-08-10.md`（P0 create fail close / P1 deadline unify / P2 owner registry）
+
 ## v2.4.9（2026-08-10，重启不一定能清理坏会话——认知修正）
 ### 背景：2026-08-10 用户实测：**重启 Operit 不一定有效**——坏会话是 proot 进程实体，可能跨重启残留；重启只清除熔断标记，`onAppCreate` 通过 hiddenExec 拉起时若撞上残留坏会话，提交依然挂起、拉起失败。此前 v2.4.8 文档把「重启」列为最可靠方案的表述不成立
 ### 变更：

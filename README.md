@@ -56,37 +56,35 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
 
 ### 已知问题与解决方案
 
-#### 1. 首次或重启 Operit 后进入插件，worker 拉起时会卡顿
-- **现象**：Operit 刚启动（或重启后）首次进入插件界面，可能出现短暂卡顿 / 加载转圈 / 工具调用延迟。
-- **原因**：worker 是常驻进程（proot Ubuntu 内），Operit 重启后需要重新拉起；`onAppCreate` 延迟 10s 后自动提交启动脚本（`start_worker.sh` 后台执行，加载模型约数秒），期间进入插件触发的工具调用会先走 `health 先检 → 租约单飞 → 轻提交 → 轮询就绪` 链路，首次拉起耗时为模型加载时间，UI 表现为卡顿。
+#### 1. 首次进入插件时 worker 自动拉起需要数秒
+- **现象**：Operit 重启后首次进入插件（或首次调用工具），worker 离线时自动拉起需数秒（模型加载），期间可能有短暂转圈/延迟。
+- **原因**：worker 是常驻进程（proot Ubuntu 内），Operit 重启后进程不保留；首次调用触发 `safeAutoLaunch`（visible terminal 投递 `start_worker.sh`，后台加载模型约数秒）后即可用。
 - **解决方案**：
-  1. **正常等待即可**：worker 拉起是自愈的，`pollWorkerReady` 最多轮询 45s，就绪后后续调用秒回；首次进入卡顿是单次性的，之后进入均直连常驻 worker。
-  2. **避免启动后立刻进入**：重启 Operit 后等 10~15s 再打开插件，通常已自动拉起完成（`onAppCreate` 路径）。
-  3. 若卡顿超过 45s 且提示「worker 45s 内未就绪」，按下方问题 2 排查坏会话。
+  1. **正常等待即可**：自动拉起是单飞且自愈的（`WorkerLaunchLock` 保证并发只投递一次），有界等待 health ≤20s，就绪后后续调用秒回；首次进入卡顿是单次性的。
+  2. 若 20s 仍未就绪（提示 `WORKER_OFFLINE` / `LAUNCH_TIMEOUT`），检查 `logs/start_worker.log` 与 `logs/engine.log`，确认 python venv 与模型文件完整。
 
-#### 2. 坏会话导致 worker 拉起失败
-- **现象**：Operit 重启后偶发首次 `hiddenExec` 提交挂起（20s+），worker 无法拉起，工具报 `TERMINAL_CHANNEL_UNAVAILABLE` 或一直转圈。
-- **原因**：Operit 重启早期 terminal executor 会话存在竞态，可能创建**坏会话**（残留跨启动）；坏会话上的命令永久挂起，导致提交/探测卡死（11 轮实验实锤：卡死 4/4 全残留、正常 7/7 无残留）。
-- **⚠️ 打开终端页面无效**（2026-08-10 实测）：hiddenExec 会话不在终端页面的会话列表里，**看不到坏会话、也无法清理**——旧建议不成立，请勿依赖。
-- **解决方案（按推荐顺序）**：
-  1. **【不重启】途径 A：/proc 定位并清理坏会话**（2026-08-10 实测有效，无需重启）
-     - 定位：`for p in /proc/[0-9]*; do c=$(tr '\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *proot*) echo "$p";; esac; done` 列出 proot 实例，再逐实例找子进程 `/bin/bash -lc 'echo LOGIN_SUCCESSFUL; echo TERMINAL_READY; eval "$COMMAND_TO_EXEC"'`（hiddenExec 会话）
-     - 识别坏会话：子 shell（`bash --noprofile --norc` 或 `bash -il`）状态为 S + `wchan` 为 `pipe_read` / `do_select`（卡在管道/IO 等待）
-     - 清理：`kill -9 <子shell> <bash会话> <对应proot>`（先杀子 shell 再杀 bash 再杀 proot）；Operit 会自动重建新 proot 与 hiddenExec 会话
-     - 收尾：删除 `logs/channel_broken.json` / `logs/launch_blocked_until` / `logs/launch_lease.json`（清除熔断与保护窗口），再调用任一工具触发拉起
-     - **验证恢复（2026-08-10 实机记录）**：清理前 cold_probe 显示 T1（提交）后无 T2/T3（挂起）；清理并清熔断后，再次调用工具触发拉起，cold_probe 出现 **T1→T3（脚本内）→T4/T5（worker 启动 pid）→T6（就绪）** 完整链路，start_worker.log 记录 `launched`——以 T3 是否出现为 hiddenExec 通道恢复的标志
-  2. **【不重启】途径 B：绕过 hiddenExec 直接拉起 worker**（2026-08-10 实测有效）
-     - worker 是 HTTP 常驻服务（127.0.0.1:8765），不依赖 hiddenExec 通道
-     - 执行：`LAUNCH_ID=L_manual_$(date +%s) setsid nohup bash /root/character_memory_engine/start_worker.sh </dev/null >> /sdcard/Download/Operit/character_memory_engine/logs/start_worker.log 2>&1 &`
-     - 验证：`curl -X POST http://127.0.0.1:8765 -d '{"action":"ping_worker","params":{}}'` 返回 pong
-     - 收尾：删除熔断/保护窗口/租约三文件（同上），插件 health 先检即直连已在线 worker
-  3. **重启 Operit**：**不一定有效**（2026-08-10 实测）——重启只保证清除熔断标记，**坏会话是 proot 进程实体，可能跨重启残留**；`onAppCreate` 通过 hiddenExec 拉起时若撞上残留坏会话，提交依然挂起、拉起失败。重启后若仍失败，回到途径 A 清理。
-  4. **等待熔断冷却过期**：会话级熔断 60s 冷却后自动允许重试一次；若坏会话仍残留，重试可能再次失败（仅作兜底，不主动依赖）。
+#### 2. Worker 离线时业务快速失败（不自动拉起的情况）
+- **现象**：worker 离线且自动拉起失败（终端不可用/超时）时，普通业务返回 `WORKER_OFFLINE`（含手动启动命令）。
+- **原因**：v2.5.0 起（Phase 0 safe-off）：**生产代码不再使用 `hiddenExec`**（已实测可制造跨重启残留的坏会话）。自动拉起仅走 visible terminal；若 visible terminal 不可用或拉起超时，业务快速失败、不无限重试、不制造会话压力。
+- **解决方案**：手动启动（或等待下次调用自动拉起重试）：
+  ```
+  LAUNCH_ID=L_manual_$(date +%s) setsid nohup bash /root/character_memory_engine/start_worker.sh </dev/null >> /sdcard/Download/Operit/character_memory_engine/logs/start_worker.log 2>&1 &
+  ```
+  验证：`curl -X POST http://127.0.0.1:8765 -d '{"action":"ping_worker","params":{}}'` 返回 pong。
+
+#### 3. 历史残留坏会话（v2.5.0 之前的 hiddenExec 孤儿）
+- **现象**：升级前若已存在 `proot + bash --noprofile --norc` 坏会话（hiddenExec 残留），它们不会自动消失（proot 进程实体跨重启残留）。
+- **说明**：v2.5.0 之后 CME **不再制造**新的 hidden 坏会话（生产代码零 hiddenExec）；历史残留只影响旧会话本身，不阻塞新链路（safeAutoLaunch 走 visible terminal，独立 registry）。
+- **清理（如需）**：`for p in /proc/[0-9]*; do c=$(tr '\0' ' ' < $p/cmdline 2>/dev/null); case "$c" in *"--noprofile --norc"*) echo "$p";; esac; done` 列出残留，逐组 kill（先子 bash 再 proot）。**不要** `killall proot` / `pkill -f worker.py`（会误伤 visible 会话与其他插件）。
 
 ### 已知限制与运维
-- **自动拉起 Worker**：`onAppCreate` 自动拉起，无需手动干预——hiddenExec 环境实为 Operit 内置 proot Ubuntu（root，python3.12 + venv 可用），拉起脚本经 `setsid` 后台分离。**注意：Operit 重启早期调用 hiddenExec 存在 executor 会话竞态风险**（实测数秒后即可正常拉起；`onAppCreate` 延迟 10s 是保守兜底，并非 Ubuntu 实际需要初始化这么久），提前调用可能创建坏会话导致卡死/闪退。**坏会话可能跨重启残留**（proot 进程实体未被回收时），重启后 `onAppCreate` 撞上残留坏会话依然会拉起失败——此时按已知问题 2 途径 A 清理。
-- **hiddenExec 会话策略**：固定 executorKey `cme`（永远复用 1 个会话，零膨胀）+ `Promise.race` 硬超时；卡死超时报错不建新会话；每次拉起强制 `freshKey` 全新会话，坏会话绝不复用。
-- **部署状态自检**：`deploy_status` 走 `/proc` 遍历（不依赖 pgrep，proot/Termux 通用）。
+- **自动拉起 Worker**：首次业务调用时自动拉起（`safeAutoLaunch`，visible terminal + `WorkerLaunchLock` 单飞 + 有界 health 等待 ≤20s）；不再依赖 `onAppCreate` 延迟拉起（P0-C1：启动期只做 HTTP health-only，不创建/复用任何 terminal session）。
+- **Worker 生命周期安全边界**（Phase 0）：
+  - 启动期（`onAppCreate`）：只 HTTP health 探测，写 `worker_state.json` ready/offline；不部署、不 kill、不 terminal、不自动拉起。
+  - 普通业务：worker 离线时自动拉起一次（visible terminal）；拉起失败快速返回 `WORKER_OFFLINE`，不重放业务。
+  - 显式重启（`deploy_restart`）：暂返回 `WORKER_RECOVERY_DISABLED`（Phase 0 不开放），提示手动方案。
+  - 诊断（`diag_engine`）：HTTP health + Files 日志，不触碰 terminal/hiddenExec。
+- **部署状态自检**：`deploy_status` 走 HTTP health（worker 在线/离线均可回答）。
 - **调试广播**（需 `--user 0`）：
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_REFRESH_PACKAGES --ez reactivate_active_packages true`
