@@ -303,12 +303,24 @@ function launchLock() {
 
 // 安全拉起：用 visible persistent terminal（terminal.create + input）投递 start_worker.sh，
 // 替代已废弃的 hiddenExec 链（P0-C3）。visible session 不产生 hidden 坏会话。
+// worker 确认 ready 时刷新 worker_state.json（观察状态，非锁；让部署页/诊断看到最新 ready）。
+function writeWorkerStateReady(source, launchId, startedMs) {
+  try {
+    var st = { state: 'ready', observedAt: new Date().toISOString(), source: source, ms: startedMs !== undefined ? startedMs : 0 };
+    if (launchId) st.launchId = launchId;
+    Tools.Files.write(DATA_DIR + '/logs/worker_state.json', JSON.stringify(st), false, 'android');
+  } catch (e) {}
+}
 async function safeLaunchInternal() {
   try {
+    var _t0 = Date.now();
     // ① health 先检（快，不占 terminal）
     var ping0 = null;
     try { ping0 = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout'); } catch (e) {}
-    if (ping0 && ping0.success) return { success: true, alreadyUp: true };
+    if (ping0 && ping0.success) {
+      writeWorkerStateReady('safeAutoLaunch_health', null, Date.now() - _t0);
+      return { success: true, alreadyUp: true };
+    }
     // ② 资源部署（P0-C4：含 start_worker.sh）
     try { await deployWorkerToData(); } catch (e) {}
     // ③ visible terminal 投递（terminal.create + input + Enter，立即返回）
@@ -342,6 +354,7 @@ async function safeLaunchInternal() {
       try { p = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout'); } catch (e) {}
       if (p && p.success) {
         cmeProbe('T6', 'launchId=' + launchId + ' src=safeAutoLaunch');
+        writeWorkerStateReady('safeAutoLaunch', launchId, Date.now() - _t0);
         return { success: true, started: true, launchId: launchId };
       }
     }
@@ -373,7 +386,11 @@ async function detectPython() {
 // business/protocol → 原样返回，不重放。
 function run(action, payload) {
   return httpCall(action, payload || {}).then(function (r) {
-    if (r && r.success) return r;
+    if (r && r.success) {
+      // worker 在线确认：刷新 worker_state.json 为 ready（观察状态）
+      writeWorkerStateReady('run_ok', null, 0);
+      return r;
+    }
     if (r && r.errorDomain === 'transport') {
       // 选项A：离线时用 visible terminal 安全拉起（不制造 hidden 坏会话），最多一次
       return safeAutoLaunch().then(function (up) {
