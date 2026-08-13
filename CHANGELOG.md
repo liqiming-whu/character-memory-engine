@@ -1,4 +1,11 @@
 # Changelog
+## v2.5.1（2026-08-14，DeepSeek v4 思考模式适配）
+### 背景：DeepSeek 现役模型 deepseek-v4-flash/v4-pro 默认开启思考模式，输出集中在 `reasoning_content`，`content` 为空导致 `analyze_chat` 提取失败（29.7s 后才报「AI 提取失败或返回格式错误」）。旧别名 `deepseek-chat` 已弃用，不能依赖它关闭思考。
+### 变更：
+- worker.py `_call_llm` 请求体新增 `"thinking": {"type": "disabled"}`（v4 系列官方关闭思考参数；实测 content 直接输出 JSON、reasoning=False，分析耗时 29.7s → 1.65s）
+- UI 自动分析耗时文案同步修正：估算公式 `count*3`（下限 15s/上限 120s）→ `count*0.3`（下限 3s/上限 30s），文案改为「预计 X 秒内完成」
+### 验证：DeepSeek API 实测（关闭思考后 1.65s 返回完整 JSON 提取结果）；py_compile / node --check 通过；已烧录
+
 ## v2.5.0（2026-08-10，移除 hiddenExec 生产链——安全拉起重构）
 ### 背景：hiddenExec 已被多轮实锤可制造「proot + bash --noprofile --norc」坏会话（pipe_read 挂起、跨重启残留、累积后全局挂起）。v2.4.9 之前所有坏会话问题都源于此。本版从架构上移除 hiddenExec 生产路径，改用已验证的 visible terminal 安全拉起。
 ### 变更：

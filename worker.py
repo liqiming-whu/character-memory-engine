@@ -1352,6 +1352,8 @@ def _call_llm(endpoint, api_key, model, prompt):
         ],
         "temperature": 0.3,
         "max_tokens": 16384,
+        # v4 系列默认开启思考模式；提取任务需 content 直接输出 JSON，关闭思考
+        "thinking": {"type": "disabled"},
     }).encode("utf-8")
     req = urllib.request.Request(endpoint, data=body, headers={
         "Content-Type": "application/json",

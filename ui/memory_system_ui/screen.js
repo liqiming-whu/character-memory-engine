@@ -242,8 +242,8 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
      dbgUi('init', 'trigger_analysis 返回 started=' + (r && r.started) + ' skipped=' + (r && r.skipped) + ' success=' + (r && r.success));
      if (r && r.started) {
         // 异步分析已启动 → 显示"分析中"并轮询刷新数据
-        var __estSec = Math.max(15, Math.min(120, Math.ceil((r.newMessageCount || 0) * 3)));
-        setResultText('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计约 ' + __estSec + ' 秒），你可以先做其他事，分析完成后将自动刷新');
+        var __estSec = Math.max(3, Math.min(30, Math.ceil((r.newMessageCount || 0) * 0.3)));
+        setResultText('检测到 ' + (r.newMessageCount || 0) + ' 条新对话，正在后台分析（预计 ' + __estSec + ' 秒内完成），你可以先做其他事，分析完成后将自动刷新');
         analyzingState[1](true); // 自动分析启动→按钮显示分析中
        triggerPollRef.current += 1;
        var pollId = triggerPollRef.current;

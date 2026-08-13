@@ -89,6 +89,14 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_INSTALL_TOOLPKG --es package_name com.operit.character_memory_engine --es file_path <toolpkg绝对路径> --ez reset_subpackage_states false`
   - `am broadcast --user 0 -a com.ai.assistance.operit.DEBUG_REFRESH_PACKAGES --ez reactivate_active_packages true`
 
+## 更新记录（最新）
+
+### v2.5.1（2026-08-14）：DeepSeek v4 思考模式适配
+- DeepSeek 现役 `deepseek-v4-flash` / `deepseek-v4-pro` **默认开启思考模式**（输出集中在 `reasoning_content`，`content` 为空），旧别名 `deepseek-chat` 已弃用。
+- worker `_call_llm` 请求体新增 `"thinking": {"type": "disabled"}`：提取任务 content 直接输出 JSON，实测分析耗时 **29.7s → 1.65s**。
+- UI 自动分析耗时文案同步修正（估算公式 `count×0.3`、下限 3s / 上限 30s）。
+- 完整变更见 [CHANGELOG.md](CHANGELOG.md)。
+
 ## 当前版本：初始化竞态修复
 
 **修复目标**：Operit 前端"JS 模块重载 + 工具调用初始化竞态"导致的**空加载（白屏）/ 卡"正在读取" / "未识别角色卡"** 三类问题。
