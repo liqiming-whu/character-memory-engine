@@ -62,11 +62,21 @@ for p in /proc/[0-9]*; do
 done
 sleep 1
 
-# 6) 启动 worker（完全脱离：setsid + 三路 stdio 重定向 + LAUNCH_ID 透传）
+# 6) 启动 worker：只认项目 venv。系统 python3 仅用于「创建 venv / 安装依赖」（UI 安装依赖按钮），
+#    不直接运行 worker（避免系统 python 缺依赖时 worker 起不来、UI 卡住）。
 PY=$ROOT_DIR/.venv/bin/python3.12
-[ -x "$PY" ] || PY=/root/.venv/bin/python3.12
-[ -x "$PY" ] || PY=/usr/bin/python3
-[ -x "$PY" ] || { echo "[start_worker] NO_PYTHON" >> $LOG_DIR/start_worker.log 2>/dev/null; exit 1; }
+if [ ! -x "$PY" ]; then
+  echo "[start_worker] NO_VENV：项目 venv 未安装，首次运行请在 UI 部署页点击「安装依赖」launchId=$LAUNCH_ID" >> $LOG_DIR/start_worker.log 2>/dev/null
+  exit 1
+fi
+# 半成品 venv 防护：三个核心依赖（onnxruntime/sqlite-vec/tokenizers）任一缺失都不得启动 worker——
+# pip 单命令顺序安装存在窗口期（onnxruntime 先装完、tokenizers/sqlite-vec 后装完），
+# 只查 onnxruntime 会放行半成品 venv → worker 启动 → import 失败 → VEC_AVAILABLE=False 进程级固化，
+# 依赖后来装完也不恢复（多次点击安装才生效、状态检查显示失败的根因）。
+if ! "$PY" -c "import onnxruntime, sqlite_vec, tokenizers" >/dev/null 2>&1; then
+  echo "[start_worker] NEED_INSTALL：venv 存在但依赖未装完（onnxruntime/sqlite-vec/tokenizers 缺失），请在 UI 部署页点击「安装依赖」launchId=$LAUNCH_ID" >> $LOG_DIR/start_worker.log 2>/dev/null
+  exit 1
+fi
 LAUNCH_ID=$LAUNCH_ID setsid "$PY" $ROOT_DIR/worker.py --port 8765 --db $ROOT_DIR/engine.db >> $LOG_DIR/engine.log 2>&1 < /dev/null &
 echo $! > $ROOT_DIR/worker.pid 2>/dev/null
 echo "[start_worker] launched pid=$! launchId=$LAUNCH_ID" >> $LOG_DIR/start_worker.log 2>/dev/null

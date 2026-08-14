@@ -306,6 +306,8 @@ function launchLock() {
 // worker 确认 ready 时刷新 worker_state.json（观察状态，非锁；让部署页/诊断看到最新 ready）。
 function writeWorkerStateReady(source, launchId, startedMs) {
   try {
+    // worker 在线确认：清除「安装中」标记（env 为主通道，文件标记由 terminal 命令尾部自行清理）
+    try { setEnv('MEMORY_ENGINE_INSTALLING', ''); } catch (e) {}
     var st = { state: 'ready', observedAt: new Date().toISOString(), source: source, ms: startedMs !== undefined ? startedMs : 0 };
     if (launchId) st.launchId = launchId;
     Tools.Files.write(DATA_DIR + '/logs/worker_state.json', JSON.stringify(st), false, 'android');
@@ -346,13 +348,27 @@ async function safeLaunchInternal() {
       return { success: false, code: 'TERMINAL_INPUT_FAILED', message: 'terminal.input 失败: ' + (e && e.message ? e.message : String(e)) };
     }
     cmeProbe('T2', 'launchId=' + launchId);
-    // ④ 有界等待 health（≤20s，轮询间隔 1.5s）
+    // ④ 有界等待 health（≤20s，轮询间隔 1.5s；start_worker.sh 报告 NO_VENV 时快速失败，不等超时）
     var deadline = Date.now() + 20000;
     while (Date.now() < deadline) {
       await new Promise(function (r) { setTimeout(r, 1500); });
+      // 快速失败：项目 venv 未安装（start_worker.sh NO_VENV/NEED_INSTALL 退出）→ 立即返回 NEED_INSTALL
+      // 只检测最近记录（最后 4 行）：start_worker.log 是 append 累积文件，全文搜索会命中历史残留
+      // （依赖装完后旧 NEED_INSTALL 仍在文件里 → 已启动仍误判「需要安装」→ 状态检查反复失败）
+      try {
+        var slog = await withTimeout(Tools.Files.read(DATA_DIR + '/logs/start_worker.log'), 4000, 'read start_worker.log timeout');
+        var slogTxt = String(slog && (slog.content || slog.text || '') || '');
+        var slogLines = slogTxt.split(/\n+/).filter(function (l) { return l && l.trim(); });
+        var recent = slogLines.slice(-4).join('\n');
+        if ((recent.indexOf('NEED_INSTALL') >= 0 || recent.indexOf('NO_VENV') >= 0) && recent.indexOf('launched') < 0) {
+          try { setEnv('MEMORY_ENGINE_NEED_INSTALL', '1'); } catch (e) {}
+          return { success: false, code: 'NEED_INSTALL', message: '首次运行：请点击「安装依赖」初始化运行环境（部署页），安装完成后 Worker 自动拉起。' };
+        }
+      } catch (e) {}
       var p = null;
       try { p = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout'); } catch (e) {}
       if (p && p.success) {
+        try { setEnv('MEMORY_ENGINE_NEED_INSTALL', ''); } catch (e) {}
         cmeProbe('T6', 'launchId=' + launchId + ' src=safeAutoLaunch');
         writeWorkerStateReady('safeAutoLaunch', launchId, Date.now() - _t0);
         return { success: true, started: true, launchId: launchId };
@@ -385,10 +401,28 @@ async function detectPython() {
 //                     拉起失败/超时 → WORKER_OFFLINE 快速失败。
 // business/protocol → 原样返回，不重放。
 function run(action, payload) {
+  // 依赖未安装标记：普通业务直接短路返回 NEED_INSTALL（不再 safeAutoLaunch 空等 20s）。
+  // 首次安装场景：进入即快速提示「请点击安装依赖」；deploy_status 不短路（用户要查进度）。
+  // 标记可能已过期（install_deps/safeAutoLaunch 已把 worker 拉起）：短路前先 ping 探测，
+  // 在线则清标记并继续执行业务 → UI 状态自动回显（否则 worker 已在线但 UI 一直显示「请点击安装依赖」）。
+  try {
+    if (action !== 'deploy_status' && getEnv('MEMORY_ENGINE_NEED_INSTALL') === '1') {
+      return httpCall('ping_worker', {}).then(function (p) {
+        if (p && p.success) {
+          try { setEnv('MEMORY_ENGINE_NEED_INSTALL', ''); } catch (e) {}
+          return httpCall(action, payload || {});
+        }
+        return { success: false, code: 'NEED_INSTALL', errorDomain: 'business', message: '首次运行：请点击「安装依赖」初始化运行环境（部署页）' };
+      }).catch(function () {
+        return { success: false, code: 'NEED_INSTALL', errorDomain: 'business', message: '首次运行：请点击「安装依赖」初始化运行环境（部署页）' };
+      });
+    }
+  } catch (e) {}
   return httpCall(action, payload || {}).then(function (r) {
     if (r && r.success) {
-      // worker 在线确认：刷新 worker_state.json 为 ready（观察状态）
+      // worker 在线确认：刷新 worker_state.json 为 ready + 清除依赖未安装标记（观察状态）
       writeWorkerStateReady('run_ok', null, 0);
+      try { setEnv('MEMORY_ENGINE_NEED_INSTALL', ''); } catch (e) {}
       return r;
     }
     if (r && r.errorDomain === 'transport') {
@@ -645,6 +679,21 @@ function tsToMs(v) {
 async function triggerAnalysis(params) {
     try {
         cmeProbe('T8');
+        // 首次安装/依赖未装：不启动后台分析（分析必然失败；且避免「检测到新对话正在分析」提前触发、混淆安装引导）
+        try {
+            if (getEnv('MEMORY_ENGINE_NEED_INSTALL') === '1') {
+                return finish({ success: false, code: 'NEED_INSTALL', skipped: true, started: false, message: '依赖未安装：请先在「部署」页点击「安装依赖」' });
+            }
+        } catch (e) {}
+        // worker 离线（含首次进入尚未拉起）：跳过自动分析，前端不进入轮询；安装完成后自动恢复
+        try {
+            var _ping = await withTimeout(httpCall('ping_worker', {}), 3000, 'ping timeout');
+            if (!_ping || !_ping.success) {
+                return finish({ success: true, skipped: true, started: false, reason: 'worker_offline', message: 'Worker 未就绪，跳过自动分析' });
+            }
+        } catch (e) {
+            return finish({ success: true, skipped: true, started: false, reason: 'worker_offline', message: 'Worker 未就绪，跳过自动分析' });
+        }
         var chatId = (params && params.chat_id) || '';
         var tr = await readTriggerJson() || {};
         if (!chatId && tr.chatId) chatId = String(tr.chatId);
@@ -829,6 +878,19 @@ exports.log_ui = logUi;
 
 // ===== deploy_*：通过 worker CLI 一次性调用 =====
 function deployStatus(params) {
+  // 安装中：返回「安装中」状态而非失败——安装期间状态检查应明确提示进行中
+  // env 标记为主通道（跨调用可靠），文件标记为辅助（terminal 写，装完自删）
+  try {
+    if (getEnv('MEMORY_ENGINE_INSTALLING') === '1') {
+      return Promise.resolve(finish({ success: true, installing: true, status: { installing: true, message: '依赖安装中' }, message: '依赖安装中，请稍候…（安装完成后 Worker 自动启动）' }));
+    }
+  } catch (e) {}
+  try {
+    var _m = Tools.Files.read(DATA_DIR + '/.installing');
+    if (_m && String(_m.content || _m.text || '').length > 0) {
+      return Promise.resolve(finish({ success: true, installing: true, status: { installing: true, message: '依赖安装中' }, message: '依赖安装中，请稍候…（安装完成后 Worker 自动启动）' }));
+    }
+  } catch (e) {}
   return run('deploy_status', params || {}).then(function (result) {
     return finish(result);
   }).catch(function (e) {
@@ -836,10 +898,87 @@ function deployStatus(params) {
   });
 }
 function deployInstall(params) {
-  return run('deploy_install', params || {}).then(function (result) {
+  // 优先 worker 在线路径（worker.py 安装到项目 venv，完成后自动重启 worker 让新依赖生效）；
+  // worker 离线（首次安装，venv 未建）→ visible terminal 直接安装（系统 python3 建 venv + pip）。
+  return httpCall('deploy_install', params || {}).then(function (result) {
+    if (result && result.success) {
+      try { setEnv('MEMORY_ENGINE_NEED_INSTALL', ''); } catch (e) {}
+      return restartWorkerAfterInstall();
+    }
+    if (result && result.errorDomain === 'transport') return installDepsViaTerminal();
     return finish(result);
   }).catch(function (e) {
-    return finish({ success: false, message: e && e.message ? e.message : String(e) });
+    return installDepsViaTerminal();
+  });
+}
+// 安装完成后重启 worker：kill 旧 worker（旧解释器/旧依赖状态，VEC_AVAILABLE 可能固化 False）→ safeAutoLaunch 用新 venv 拉起
+function restartWorkerAfterInstall() {
+  var term = Tools.System && Tools.System.terminal;
+  if (!term || typeof term.create !== 'function' || typeof term.input !== 'function') {
+    return finish({ success: true, message: '依赖已安装。请手动重启 Worker 生效：kill $(cat ' + ROOT_DIR + '/worker.pid 2>/dev/null) 后重新拉起。' });
+  }
+  var cmd = 'kill $(cat ' + ROOT_DIR + '/worker.pid 2>/dev/null) 2>/dev/null; sleep 1; pkill -f "' + ROOT_DIR + '/worker.py" 2>/dev/null; echo cme_worker_killed';
+  return term.create('cme_restart_worker').then(function (sess) {
+    if (!sess || !sess.sessionId) return finish({ success: true, message: '依赖已安装。请点击「检查状态」拉起 Worker（新 venv 生效）。' });
+    return term.input(sess.sessionId, { input: cmd, control: 'enter' }).then(function () {
+      return safeAutoLaunch().then(function (up) {
+        if (up && up.success) return finish({ success: true, message: '依赖安装完成，Worker 已用新 venv 重启（向量能力已就绪）。' });
+        return finish({ success: true, message: '依赖已安装。Worker 自动重启未就绪，请点击「检查状态」手动拉起。' });
+      });
+    }).catch(function (e) {
+      return finish({ success: true, message: '依赖已安装。请点击「检查状态」拉起 Worker。' });
+    });
+  }).catch(function (e) {
+    return finish({ success: true, message: '依赖已安装。请点击「检查状态」拉起 Worker。' });
+  });
+}
+// 首次安装：visible terminal 投递「系统 python3 建 venv + pip 装依赖」（不依赖 worker 在线）
+// 装完自动执行 start_worker.sh：依赖完整性检查通过后自动拉起 worker（一次点击闭环，无需再手动点）
+// .installing 标记：安装进行中去重（重复点击返回「安装中」不再投递）+ UI 区分「安装中」vs「完成」
+function installDepsViaTerminal() {
+  var marker = DATA_DIR + '/.installing';
+  // 已在安装（env 主通道 + 文件标记辅助）：直接返回「安装中」，不重复投递
+  try {
+    if (getEnv('MEMORY_ENGINE_INSTALLING') === '1') {
+      return Promise.resolve(finish({ success: true, installing: true, message: '依赖正在安装中，请稍候…（安装完成后 Worker 自动启动，无需重复点击）' }));
+    }
+  } catch (e) {}
+  try {
+    var _prev = Tools.Files.read(marker);
+    if (_prev && String(_prev.content || _prev.text || '').length > 0) {
+      return Promise.resolve(finish({ success: true, installing: true, message: '依赖正在安装中，请稍候…（安装完成后 Worker 自动启动，无需重复点击）' }));
+    }
+  } catch (e) {}
+  // 命令链容错：pip install 用「;」连接（失败也尝试 start_worker.sh，其依赖检查会 NEED_INSTALL 兜底），
+  // 避免 pip 某条命令退出码非 0 导致装完也不拉起 worker
+  // install.log 诊断：记录 BEGIN/VENV_DONE/PIP_DEPS_RC/START_RC，定位「装完不自动拉起」断在哪一步
+  var cmd = 'M=' + marker + '; L=' + DATA_DIR + '/logs/install.log; mkdir -p "$(dirname $M)" "$(dirname $L)" 2>/dev/null; echo "[$(date "+%F %T")] BEGIN" >> $L; if [ -f $M ] && [ -s $M ]; then echo "[$(date "+%F %T")] SKIP_ALREADY" >> $L; echo CME_SKIP_ALREADY_INSTALLING; else echo 1 > $M; echo "[$(date "+%F %T")] VENV_START" >> $L; mkdir -p ' + ROOT_DIR + ' && cp -f ' + DATA_DIR + '/start_worker.sh ' + ROOT_DIR + '/start_worker.sh 2>/dev/null; chmod +x ' + ROOT_DIR + '/start_worker.sh 2>/dev/null; cd ' + ROOT_DIR + ' && python3 -m venv .venv && echo "[$(date "+%F %T")] VENV_DONE" >> $L && ./.venv/bin/pip install --upgrade pip && echo "[$(date "+%F %T")] PIP_UPGRADE_DONE" >> $L && ./.venv/bin/pip install onnxruntime sqlite-vec tokenizers; echo "[$(date "+%F %T")] PIP_DEPS_RC=$?" >> $L; echo "[$(date "+%F %T")] PRE_START lock=$(ls -d /tmp/cme_start_worker.lock 2>/dev/null || echo none) sw=$(test -s ' + ROOT_DIR + '/start_worker.sh && echo ok || echo missing)" >> $L; LAUNCH_ID=install_deps_' + Date.now() + ' bash ' + ROOT_DIR + '/start_worker.sh; echo "[$(date "+%F %T")] START_RC=$? workers=$(pgrep -fc "worker.py" 2>/dev/null || echo 0)" >> $L; echo "[$(date "+%F %T")] DONE" >> $L; rm -f $M; fi';
+  var term = Tools.System && Tools.System.terminal;
+  if (!term || typeof term.create !== 'function' || typeof term.input !== 'function') {
+    return finish({ success: false, code: 'TERMINAL_UNAVAILABLE', message: '终端服务未就绪（Operit 冷启动早期），请 3-5 秒后再点一次「安装依赖」。手动执行：' + cmd });
+  }
+  // 冷启动早期 terminal.create 可能失败（踩坑 10.3/10.4：早期 terminal/executor 未就绪）——
+  // 有限重试 3 次（1s/3s/5s）后再放弃，避免「刚进入点安装显示失败」的体验。
+  function tryCreate(retry) {
+    return term.create('cme_install_deps').then(function (sess) {
+      if (!sess || !sess.sessionId) throw new Error('no session');
+      return sess;
+    }).catch(function (e) {
+      if (retry < 3) {
+        return new Promise(function (res) { setTimeout(res, retry === 0 ? 1000 : (retry === 1 ? 3000 : 5000)); }).then(function () { return tryCreate(retry + 1); });
+      }
+      throw e;
+    });
+  }
+  return tryCreate(0).then(function (sess) {
+    return term.input(sess.sessionId, { input: cmd, control: 'enter' }).then(function () {
+      try { setEnv('MEMORY_ENGINE_INSTALLING', '1'); } catch (e) {}
+      return finish({ success: true, installing: true, message: '已在终端启动依赖安装（需几分钟）。安装完成后 Worker 将自动用新 venv 启动，向量能力自动生效。' });
+    }).catch(function (e) {
+      return finish({ success: false, code: 'TERMINAL_INPUT_FAILED', message: 'terminal.input 失败: ' + (e && e.message ? e.message : String(e)) });
+    });
+  }).catch(function (e) {
+    return finish({ success: false, code: 'TERMINAL_CREATE_FAILED', message: '终端会话创建失败（已重试 3 次）：' + (e && e.message ? e.message : String(e)) + '。请 5 秒后再点一次「安装依赖」。' });
   });
 }
 function deployRestart(params) {

@@ -196,6 +196,8 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
   setTimeout(function() {
   (async function() {
    try {
+     // 首次安装场景：依赖未装时跳过自动分析（避免「检测到新对话正在后台分析」提前触发、混淆安装引导）
+     try { if (ctx.getEnv('MEMORY_ENGINE_NEED_INSTALL') === '1') { dbgUi('init', 'NEED_INSTALL：跳过自动分析'); return; } } catch (e) {}
      var startTriggerPoll = function(countHint, hintText) {
        triggerPollRef.current += 1;
        var pollId = triggerPollRef.current;
@@ -311,6 +313,14 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
   // 失败后若无用户操作会冻结在"正在读取"；失败时自排队下一次，成功或达上限才停止）
   function retryLoadData() {
     if (dataLoadScheduledRef.current) return;
+    // NEED_INSTALL / 安装中：env 标记存在 → 停止自动重试（避免安装期间反复 1.7s 重试卡 UI；
+    // 安装完成后 worker 在线自动恢复加载）
+    try {
+      if (ctx.getEnv('MEMORY_ENGINE_NEED_INSTALL') === '1' || ctx.getEnv('MEMORY_ENGINE_INSTALLING') === '1') {
+        dbgUi('sched', 'NEED_INSTALL/安装中：停止自动重试');
+        return;
+      }
+    } catch (e) {}
     var _f = Number(dataLoadFailCountRef.current || 0);
     if (_f >= 5) return; // 连续 5 次失败停止自动重试
     dataLoadScheduledRef.current = true;
@@ -318,9 +328,13 @@ var dbgRenderCount = ((typeof globalThis !== 'undefined' ? globalThis : window).
     dbgUi('sched', 'loadData 调度（dataLoadedTs=' + dataLoadedState[0] + ' failCount=' + _f + '）');
     setTimeout(function() {
       loadData().then(function(ok) {
-        dataLoadedState[1](ok ? Date.now() : 0); // 成功记时间戳；失败置 0
-        if (ok) { dataLoadFailCountRef.current = 0; }
-        else { dataLoadFailCountRef.current = (dataLoadFailCountRef.current || 0) + 1; }
+        dataLoadedState[1](ok === true ? Date.now() : 0); // 成功记时间戳；失败置 0
+        if (ok === true) { dataLoadFailCountRef.current = 0; }
+        else if (ok !== 'NEED_INSTALL') { dataLoadFailCountRef.current = (dataLoadFailCountRef.current || 0) + 1; }
+        if (ok === 'NEED_INSTALL') {
+          // 首次安装引导：显示明确提示，不再自动重试
+          setResultText('首次运行：请到「部署」页点击「安装依赖」初始化运行环境，安装完成后 Worker 自动拉起');
+        }
       }).finally(function() {
         dataLoadScheduledRef.current = false;
         // 失败自驱：不等 render，主动排队下一次
@@ -575,6 +589,12 @@ loadingChatsState[1](false);
           ctx.setEnv('MEMORY_ENGINE_DATA_LOADED', '1');
         } catch(ex) {}
         return true;
+      }
+      // NEED_INSTALL：首次运行依赖未安装 → 停止重试，引导去部署页安装（避免 2-3s 反复重试卡 UI）
+      var _errMsg = r && (r.message || r.error || '') || '';
+      if (r && (r.code === 'NEED_INSTALL' || String(_errMsg).indexOf('安装依赖') >= 0)) {
+        dbgUi('loadData', 'req#' + rid + ' NEED_INSTALL：停止重试，请到部署页安装依赖');
+        return 'NEED_INSTALL';
       }
     } catch (e) {}
     return false;

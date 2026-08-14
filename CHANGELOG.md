@@ -1,4 +1,18 @@
 # Changelog
+## v2.6.0（2026-08-14，从 0 安装全链路闭环）
+### 背景：从 0 安装验证暴露的问题链已全部修复并实测通过：首次进入 UI 卡住 → 依赖装完向量不生效 → 安装中状态误报失败 → 装完不自动拉起 → 前端不回显。本轮补齐最后三处：半成品 venv 防护不全（只查 onnxruntime，pip 顺序安装窗口期放行半成品 worker）、冷启动早期 terminal 未就绪导致点击安装直接失败、安装完成后前端无自动回显。
+### 变更（含此前未发布的所有从 0 安装链路修复）：
+- **半成品 venv 防护升级（全依赖）**：start_worker.sh 改为 `"$PY" -c "import onnxruntime, sqlite_vec, tokenizers"` 三依赖全查——pip 单命令顺序安装存在窗口期（onnxruntime 先装完、tokenizers/sqlite-vec 后），任一缺失即 `NEED_INSTALL`，杜绝半成品 worker 启动导致 `VEC_AVAILABLE=False` 进程级固化
+- **install_deps 自动拉起权限修复**：cp 后 `chmod +x` + 执行改 `bash start_worker.sh`（与 safeAutoLaunch 同款显式解释，避免源文件无 x 权限导致 Permission denied 而 START_RC 假 0）
+- **install.log 阶段诊断**：BEGIN / VENV_DONE / PIP_DEPS_RC / PRE_START(lock+sw) / START_RC(workers) / DONE，定位自动拉起断点
+- **冷启动 terminal 未就绪兜底**：installDepsViaTerminal 的 terminal.create 有限重试 3 次（1s/3s/5s），仍失败提示「终端未就绪，请 5 秒后再点」而非「安装失败」
+- **前端自动轮询回显**：deploy.js 安装中每 5s 查 deploy_status，worker 全绿（worker_running + vec_available + tokenizers_ok）即回显「依赖安装完成」，最长 6 分钟停止；无需用户手动再点检查/再次安装
+- **run() 短路前 ping 探测**：`MEMORY_ENGINE_NEED_INSTALL` 标记可能已过期（worker 已被拉起），短路前先 ping——在线则清标记并继续执行业务，UI 状态自动回显
+- **安装中标记体系**：env 主通道 + `.installing` 文件辅助（mkdir -p 前置），重复点击返回「安装中」不重复投递；deploy_status 返回 `installing:true`
+- **safeAutoLaunch 快速失败**：项目 venv 缺失 → `NO_VENV` 毫秒级返回；半成品 → `NEED_INSTALL`；只读 start_worker.log 最后 4 行避免历史残留误判
+- **loadData/自动分析短路**：NEED_INSTALL 停止重试不卡 UI；triggerAnalysis 离线短路不提前触发
+### 验证：从 0 安装实测通过——点一次安装 → pip 装完自动拉起 → 轮询 75s 回显全绿 → 自动分析秒级入库（items:10 errors:0）；node --check / bash -n 通过；已烧录
+
 ## v2.5.1（2026-08-14，DeepSeek v4 思考模式适配）
 ### 背景：DeepSeek 现役模型 deepseek-v4-flash/v4-pro 默认开启思考模式，输出集中在 `reasoning_content`，`content` 为空导致 `analyze_chat` 提取失败（29.7s 后才报「AI 提取失败或返回格式错误」）。旧别名 `deepseek-chat` 已弃用，不能依赖它关闭思考。
 ### 变更：

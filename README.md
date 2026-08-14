@@ -91,6 +91,12 @@ nohup /root/character_memory_engine/.venv/bin/python3.12 /root/character_memory_
 
 ## 更新记录（最新）
 
+### v2.6.0（2026-08-14）：从 0 安装全链路闭环
+- 半成品 venv 防护升级为全依赖检查（onnxruntime + sqlite-vec + tokenizers 任一缺失即 NEED_INSTALL），杜绝 pip 顺序安装窗口期启动半成品 worker
+- install_deps 自动拉起权限修复（chmod +x + bash 显式执行）+ install.log 阶段诊断（PRE_START/START_RC/workers）
+- 冷启动早期 terminal 未就绪自动重试 3 次（1s/3s/5s），不再「点击安装显示失败」
+- 安装完成后前端自动轮询回显（每 5s 查状态，全绿即显示完成，无需手动再点）
+- run() 短路前 ping 探测：worker 已被拉起时清标记并继续业务，UI 状态自动回显
 ### v2.5.1（2026-08-14）：DeepSeek v4 思考模式适配
 - DeepSeek 现役 `deepseek-v4-flash` / `deepseek-v4-pro` **默认开启思考模式**（输出集中在 `reasoning_content`，`content` 为空），旧别名 `deepseek-chat` 已弃用。
 - worker `_call_llm` 请求体新增 `"thinking": {"type": "disabled"}`：提取任务 content 直接输出 JSON，实测分析耗时 **29.7s → 1.65s**。

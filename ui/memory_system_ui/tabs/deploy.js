@@ -37,6 +37,14 @@ function render(ctx) {
       var raw = await ctx.callTool('memory_engine:deploy_status', {});
       try { if (typeof console !== 'undefined' && console.log) console.log('[deploy_status] RAW=' + JSON.stringify(raw)); } catch (e) {}
       var r = parseResult(raw);
+      if (r && r.success && r.installing) {
+        // 依赖安装中：明确提示进行中（不是失败），完成后 Worker 自动启动
+        statusState[1]({ installing: true, message: '依赖安装中' });
+        msgState[1]('依赖安装中（需几分钟），完成后 Worker 自动启动，可稍后再查');
+        toast('依赖安装中，请稍候');
+        setBusy('');
+        return;
+      }
       if (r && r.success) {
         var s = r.status || r.data || {};
         statusState[1](s);
@@ -100,6 +108,38 @@ function render(ctx) {
     logLoadingState[1](false);
   }
 
+  // 安装中自动轮询：每 5s 查 deploy_status，worker 就绪（tokenizers/vec 全绿）即回显完成；
+  // 最多轮询 72 次（6 分钟）后停止，避免无限循环。
+  function pollInstallUntilReady(statusState, msgState) {
+    var n = 0;
+    (function tick() {
+      if (n >= 72) return;
+      n++;
+      ctx.callTool('memory_engine:deploy_status', {}).then(function (raw) {
+        var r = parseResult(raw);
+        if (r && r.success && r.installing) {
+          msgState[1]('依赖安装中（需几分钟）...已等待 ' + (n * 5) + 's');
+        } else if (r && r.success) {
+          var s = r.status || r.data || {};
+          if (s.worker_running && s.vec_available && s.tokenizers_ok) {
+            // 全绿：回显完成，停止轮询
+            statusState[1](s);
+            msgState[1]('依赖安装完成，向量能力已就绪 ✓');
+            toast('依赖安装完成');
+            return;
+          }
+          msgState[1]('依赖安装中（需几分钟）...已等待 ' + (n * 5) + 's');
+        } else {
+          msgState[1]('依赖安装中（需几分钟）...已等待 ' + (n * 5) + 's');
+        }
+        setTimeout(tick, 5000);
+      }).catch(function () {
+        msgState[1]('依赖安装中（需几分钟）...已等待 ' + (n * 5) + 's');
+        setTimeout(tick, 5000);
+      });
+    })();
+  }
+
   async function doInstall() {
     if (busyState[0]) return; // 防连点
     setBusy('安装中');
@@ -107,6 +147,17 @@ function render(ctx) {
     try {
       var raw = await ctx.callTool('memory_engine:deploy_install', {});
       var r = parseResult(raw);
+      if (r && r.success && r.installing) {
+        // 离线路径：命令已投递到终端后台执行（fire-and-forget），几秒内不可能装完——
+        // 不能显示「完成」也不能立即查状态（会误报失败），提示等待即可
+        msgState[1]('依赖安装中（需几分钟），完成后 Worker 自动启动，可稍后查看状态');
+        toast('已启动依赖安装，请等待完成');
+        // 自动轮询回显：每 5s 查一次 deploy_status，worker 就绪（tokenizers/vec 全绿）即回显完成，
+        // 无需用户再手动点「检查状态/再次安装」才看到成功（安装期间半成品状态不会误报为完成）
+        pollInstallUntilReady(statusState, msgState);
+        setBusy('');
+        return;
+      }
       if (r && r.success) {
         msgState[1]('依赖安装完成 ✓');
         toast('依赖安装完成');
@@ -306,7 +357,7 @@ function render(ctx) {
   if (firstRunHint) {
     items.push(UI.Spacer({ height: 8 }));
     items.push(UI.Surface({ fillMaxWidth: true, shape: { cornerRadius: 8 }, containerColor: colors.errorContainer, padding: 10 }, [
-      UI.Text({ text: '首次使用：请点击「检查状态」确认 Worker 可用，必要时「安装依赖」或「重启 Worker」。', style: 'labelSmall', color: colors.error }),
+      UI.Text({ text: '首次运行：请点击「安装依赖」初始化运行环境（系统 python3 创建 venv + 安装依赖，需几分钟），完成后点击「检查状态」验证，Worker 会自动拉起。', style: 'labelSmall', color: colors.error }),
     ]));
   }
 
