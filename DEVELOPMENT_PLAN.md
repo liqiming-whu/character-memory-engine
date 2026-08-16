@@ -5,6 +5,7 @@
 > - 基线：master `b8ea6b0`（tag v2.6.0）；官方架构参考：`/root/projects/operit-official/examples/sidebar_account_book`。
 > - 待办最高优先：P0-01 备份恢复安全闭环、P0-02 hash/向量一致性、P0-03 分析完成契约、P0-04 Worker supervisor 状态机、P0-05 HTTP 安全边界；历史 2026-08-10 审计 20 项中仍有 15 项未修。
 > - 本文件下方历史战役记录保留作经验档案；新开发任务一律以路由文档的条目为准，历史条目只读不回填。
+> - 终端调用边界硬约束（会话复用/运行期零依赖/execStreaming/不回退 hiddenExec）见路由文档第 13 节，与报告一同执行；实施 P0-04 与 M2 时必须满足。
 
 ---
 

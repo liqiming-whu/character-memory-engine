@@ -477,3 +477,15 @@ health 是最终真值；持久状态只描述最近一次 attempt，启动时�
 - 7 个正式 Tab 在真机功能对等，快速切换与连续操作无 ANR/闪退；部署离线恢复不依赖 Worker 网页。
 - 根目录孤儿 `deploy.js`、`memory_engine.js` 不进入版本库/发布包；manifest resources、subpackage 和实际包内容可自动核验。
 - `DEVELOPMENT_PLAN.md` 与架构文档同步反映最终 ownership、状态机、WebView、API、安全和回滚边界。
+
+## 13. 终端调用边界约束（开发者补充，2026-08-16，与本文档其余条目一同执行）
+
+> 来源：对照官方 examples（github/linux_ssh/sidebar_* 等）统一使用 `Tools.System.terminal` 会话生命周期 API（create/exec/execStreaming/input/screen/close）与 CME v2.6.0 终端调用现状（main.js 零终端调用；packages/memory_engine.js 仅 safeAutoLaunch 用 visible terminal 投递 + deploy_* 兜底直连）。以下约束并入 P0-04 与 M2 的设计要求。
+
+1. **会话命名复用，不做投递即弃**：supervisor 持有固定命名控制会话（如 `cme_worker_ctrl`），status/restart/install 等控制命令统一走该会话的 exec；不再每次 create 一次性投递后遗弃（现状 `cme_worker_launch` 创建后不 close，存在会话残留与 Operit 重启早期 executor 竞态风险，见 main.js:488 注释）。
+2. **运行期绝不依赖 terminal 生命周期**（硬约束，不照搬官方 sidebar 模式）：官方 sidebar 系列用 terminal 长期托管 Web 服务进程，但 CME 已实锤 proot 会话回收会整树 kill worker（2026-08-08 ANR 记录；start_worker.sh 的 setsid 脱离即为此设计）。terminal 只做「投递 + 健康确认」，worker 运行期必须脱离 terminal 生命周期；supervisor 状态机不得把 terminal 会话存活作为 worker 健康前提。
+3. **安装类命令优先前台 execStreaming**：deploy_install（pip 安装）由 nohup + 轮询 start_worker.log 尾部（含历史残留处理，memory_engine.js:359）改为前台 execStreaming 等待自然结束，输出直接回流；start_worker.sh 的异步脱离启动路径保持不变（启动本身即发即返）。
+4. **补 close 语义**：控制会话在确认 worker 健康/任务完成后 close（或空闲回收），避免 Android 侧 terminal 会话泄漏；与 Operit 重启竞态同属资源生命周期问题。
+5. **terminal 调用收敛到 worker_runtime 模块**：memory_engine.js 中散落的 term.create/input、health 轮询、log 读取全部收进 `shared/worker_runtime.js`，对外只暴露 `ensureWorker()/installDeps()/restartWorker()` 语义接口，内部 transport 用 `Tools.System.terminal`（create/exec/input/screen）——结构与官方 sidebar 系列 web_runtime 一致。
+6. **不回退 hiddenExec**：官方 linux_ssh/code_runner 仍用 hiddenExec，但 CME 已实测其坏会话问题并删除（P0-C3，main.js:58-59）。visible terminal + exec/execStreaming 为唯一生产路径；与第 11 节「绝不恢复 hiddenExec」一致，不因对齐官方而松动。
+
